@@ -1,0 +1,14 @@
+# IDE files
+.idea/
+.vscode/
+.classpath
+.project
+.settings/
+
+# build files
+target/
+
+# cred files
+gcp.json
+aws.properties
+
