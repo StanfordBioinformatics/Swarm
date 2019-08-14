@@ -17,6 +17,7 @@ public class VariantQuery {
     private NumericValueComparisonOperator endPositionComparisonOperator;
     private NumericValueComparisonOperator minorAFPositionComparisonOperator;
 
+    private boolean usePositionAsRange = false;
 
     private String tableIdentifier;
     //private boolean usePositionAsRange = false;
@@ -116,6 +117,7 @@ public class VariantQuery {
 
     /**
      * Returns the minorAF upper bound, accounting for minorAFMarginOfErrorPercentage
+     * TODO prevent overflow
      */
     public Double getMinorAFUpperBound() {
         if (getMinorAF() == null) {
@@ -129,6 +131,7 @@ public class VariantQuery {
 
     /**
      * Returns the minorAF lower bound, accounting for minorAFMarginOfErrorPercentage
+     * TODO prevent overflow under
      */
     public Double getMinorAFLowerBound() {
         if (getMinorAF() == null) {
@@ -162,8 +165,13 @@ public class VariantQuery {
      * the start and end as an inclusive range.
      */
     public void setUsePositionAsRange() {
+        this.usePositionAsRange = true;
         setStartPositionComparisonOperator(NumericValueComparisonOperator.GREATER_OR_EQUAL);
         setEndPositionComparisonOperator(NumericValueComparisonOperator.LESS_OR_EQUAL);
+    }
+
+    public boolean getUsePositionAsRange() {
+        return this.usePositionAsRange;
     }
 
     public void setMinorAFComparisonOperator(@NotNull NumericValueComparisonOperator minorAFComparisonOperator) {

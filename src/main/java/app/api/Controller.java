@@ -7,7 +7,10 @@ import app.dao.query.VariantQuery;
 //import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
+import com.amazonaws.services.athena.model.Datum;
+import com.amazonaws.services.athena.model.Row;
 import com.amazonaws.services.s3.model.S3ObjectId;
+import com.google.api.services.bigquery.model.TableDataInsertAllRequest;
 import com.google.cloud.bigquery.*;
 import com.google.cloud.storage.BlobId;
 import com.google.gson.stream.JsonWriter;
@@ -22,6 +25,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.validation.ValidationException;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -84,6 +88,99 @@ public class Controller {
         return s3Client;
     }
 
+    private class GeneCoordinate {
+        public String referenceName;
+        public Long startPosition;
+        public Long endPosition;
+    }
+
+    @RequestMapping(
+            value = "/variants_by_gene/{gene_label}",
+            method = {RequestMethod.GET}
+    )
+    public void getVariantsByGene(
+            @PathVariable("gene_label") String geneLabel,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, SQLException, InterruptedException {
+        Pattern geneNamePattern = Pattern.compile("[a-zA-Z0-9]+");
+        Matcher geneNameMatcher = geneNamePattern.matcher(geneLabel);
+        if (!geneNameMatcher.matches()) {
+            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Gene name did not match regex filter");
+            return;
+        }
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+        Callable<GeneCoordinate> geneLookupCallable = new Callable<GeneCoordinate>() {
+            @Override
+            public GeneCoordinate call() throws Exception {
+                // get gene coordinates
+                String coordSql =
+                        "select chromosome, start_position, end_position"
+                                + " from swarm.relevant_genes_view_hg19"
+                                + " where gene_name = ?";
+                QueryJobConfiguration coordJobConfig = QueryJobConfiguration.newBuilder(coordSql)
+                        .addPositionalParameter(QueryParameterValue.string(geneLabel))
+                        .build();
+                TableResult coordTr = getBigQueryClient().runQueryJob(coordJobConfig);
+                assert(coordTr.getTotalRows() == 1);
+                FieldValueList fieldValues = coordTr.iterateAll().iterator().next();
+                GeneCoordinate coordinate = new GeneCoordinate();
+                coordinate.referenceName = fieldValues.get("chromosome").getStringValue();
+                coordinate.startPosition = fieldValues.get("start_position").getLongValue();
+                coordinate.endPosition = fieldValues.get("end_position").getLongValue();
+
+                System.out.printf("Gene %s has hg19 coordinates %s:%d-%d\n",
+                        geneLabel, coordinate.referenceName, coordinate.startPosition, coordinate.endPosition);
+                return coordinate;
+            }
+        };
+
+        final GeneCoordinate geneCoordinate;
+        Future<GeneCoordinate> coordinateFuture = executorService.submit(geneLookupCallable);
+        try {
+            geneCoordinate = coordinateFuture.get(3 * 60, TimeUnit.SECONDS);
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            e.printStackTrace();
+            response.sendError(500, "Failed to determine gene coordinates");
+            return;
+        }
+
+        log.info("Delegating to Controller.getVariants");
+        this.getVariants(
+                geneCoordinate.referenceName,
+                geneCoordinate.startPosition.toString(),
+                geneCoordinate.endPosition.toString(),
+                null,
+                null,
+                "true",
+                request,
+                response);
+
+        /*
+        // Run query for variants within intersection table overlapping with gene
+                String matchSql =
+                        "select reference_name, start_position, end_position, reference_bases, alternate_bases, minor_af"
+                                + " from swarm.1000genomes_vcf_half1 "
+                                + " where reference_name = ? "
+                                + " and "
+                                + " ((start_position >= ? and start_position <= ?)" // start pos overlaps gene
+                                + " or (end_position >= ? and end_position <= ?)" // end pos overlaps gene
+                                + " or (start_position < ? and end_position > ?))"; // variant is larger than gene
+
+                QueryJobConfiguration matchJobConfig = QueryJobConfiguration.newBuilder(matchSql)
+                        .addPositionalParameter(QueryParameterValue.string(chromosome))
+                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
+                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
+                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
+                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
+                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
+                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
+                        .build();
+                TableResult tr = getBigQueryClient().runQueryJob(matchJobConfig);
+                log.info("finished gcp variant query");
+                return tr;
+         */
+    }
 
     @RequestMapping(
             value = "/variants",
@@ -96,10 +193,21 @@ public class Controller {
             @RequestParam(required = false, name = "end_position") String endPositionParam,
             @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
             @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
             HttpServletRequest request, HttpServletResponse response
-    ) throws IOException {
+    ) throws IOException, SQLException, InterruptedException {
         VariantQuery variantQuery = new VariantQuery();
         try {
+            if (!StringUtils.isEmpty(positionRange)) {
+                if (positionRange.equalsIgnoreCase("true")) {
+                    log.debug("Using positions as a range");
+                    variantQuery.setUsePositionAsRange();
+                } else if (positionRange.equalsIgnoreCase("false")) {
+                    // nothing
+                } else {
+                    throw new ValidationException("Invalid param for position_range, must be true or false");
+                }
+            }
             /*if (!StringUtils.isEmpty(cloudParam)) {
                 validateCloudParam(cloudParam);
             }*/
@@ -238,11 +346,67 @@ public class Controller {
             gcsUploadStream.close();
             log.debug("Finished transfer from S3 to GCS");
             // create the table from the file uploaded
-            String importedAthenaTableName = "athena_import_" + athenaOutputId;
+            String tableNameSafeAthenaOutputId = athenaOutputId.replaceAll("-", "");
+            log.debug("Converted athena output id from " + athenaOutputId +
+                    " to table name safe: " + tableNameSafeAthenaOutputId);
+            String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
             log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
             Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
                     importedAthenaTableName, gcsAthenaImportDirectory);
             log.info("Finished creating table: " + importedAthenaTableName);
+
+            // TODO join the tables together
+            String mergeSql = "select\n" +
+                    "  a.reference_name, \n" +
+                    "  a.start_position,\n" +
+                    "  a.end_position,\n" +
+                    "  a.reference_bases,\n" +
+                    "  a.alternate_bases,\n" +
+                    "  (\n" +
+                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
+                    "     / \n" +
+                    "    (\n" +
+                    "      (sum((cast(a.minor_af as float64))) \n" +
+                    "       + sum((cast(b.minor_af as float64))))\n" +
+                    "       * \n" +
+                    "      (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)))" +
+                    "    )\n" +
+                    "   ) as minor_af,\n" +
+                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
+                    "from \n" +
+                    "  swarm.%s b\n" +
+                    "full outer join\n" +
+                    "  swarm.%s a\n" +
+                    "  on a.reference_name = b.reference_name\n" +
+                    "  and a.start_position = b.start_position\n" +
+                    "  and a.end_position = b.end_position\n" +
+                    "  and a.reference_bases = b.reference_bases\n" +
+                    "  and a.alternate_bases = b.alternate_bases\n" +
+                    "group by a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases";
+            // first placeholder si bigquery tablename, second is athena tablename
+            mergeSql = String.format(mergeSql, bigqueryDestinationTable, importedAthenaTableName);
+            log.info(String.format(
+                    "Merging tables %s and %s and returning results",
+                    bigqueryDestinationTable, importedAthenaTableName));
+            TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
+            log.info("Finished merge query in BigQuery");
+            log.info("Writing status 200");
+            response.setStatus(200);
+            PrintWriter responseWriter = response.getWriter();
+            log.info("Writing data to response stream");
+            for (FieldValueList fvl : tr.iterateAll()) {
+                responseWriter.println(String.format(
+                        "%s,%d,%d,%s,%s,%f,%d",
+                        fvl.get("reference_name").getStringValue(),
+                        fvl.get("start_position").getLongValue(),
+                        fvl.get("end_position").getLongValue(),
+                        fvl.get("reference_bases").getStringValue(),
+                        fvl.get("alternate_bases").getStringValue(),
+                        fvl.get("minor_af").getDoubleValue(),
+                        fvl.get("allele_count").getLongValue()
+                ));
+            }
+            log.info("Finished writing response");
         } else {
             log.info("Performing rest of computation in Athena");
             // TODO
@@ -269,13 +433,83 @@ public class Controller {
             log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
             athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory);
             log.info("Finished creating table: " + importedBigqueryTableName);
-        }
-        response.setStatus(200);
-        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
-        jsonWriter.beginObject();
-        jsonWriter.name("message").value("hello world");
-        jsonWriter.endObject();
 
+            // TODO join the tables together
+            String mergeSql = "select\n" +
+                    "  a.reference_name, \n" +
+                    "  a.start_position,\n" +
+                    "  a.end_position,\n" +
+                    "  a.reference_bases,\n" +
+                    "  a.alternate_bases,\n" +
+                    "  (\n" +
+                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
+                    "     / \n" +
+                    "    (\n" +
+                    "      (sum((cast(a.minor_af as double))) \n" +
+                    "       + sum((cast(b.minor_af as double))))\n" +
+                    "       * \n" +
+                    "      (\n" +
+                    "        sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))\n" +
+                    "      )\n" +
+                    "    )\n" +
+                    "   ) as minor_af,\n" +
+                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
+                    "from \n" +
+                    "  swarm.%s a\n" +
+                    "full outer join\n" +
+                    "  swarm.%s b\n" +
+                    "  on a.reference_name = b.reference_name\n" +
+                    "  and a.start_position = b.start_position\n" +
+                    "  and a.end_position = b.end_position\n" +
+                    "  and a.reference_bases = b.reference_bases\n" +
+                    "  and a.alternate_bases = b.alternate_bases\n" +
+                    "group by\n" +
+                    "(a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases)";
+            // 1st placeholder is athena table name, second is tablename from imported bigquery table
+            mergeSql = String.format(mergeSql, athenaDestinationTable, importedBigqueryTableName);
+            log.info(String.format(
+                    "Merging tables %s and %s and returning results",
+                    athenaDestinationTable, importedBigqueryTableName));
+            com.amazonaws.services.athena.model.ResultSet rs = athenaClient.executeQueryToResultSet(mergeSql);
+            log.info("Finished merge query in Athena");
+            log.info("Writing status 200");
+            response.setStatus(200);
+            List<Row> rows = rs.getRows();
+            log.info("Writing data to response stream");
+
+            PrintWriter responseWriter = response.getWriter();
+            for (Row row : rows) {
+                List<Datum> data = row.getData();
+                responseWriter.println(String.format(
+                        "%s,%s,%s,%s,%s,%s,%s",
+                        data.get(0).getVarCharValue(),
+                        data.get(1).getVarCharValue(),
+                        data.get(2).getVarCharValue(),
+                        data.get(3).getVarCharValue(),
+                        data.get(4).getVarCharValue(),
+                        data.get(5).getVarCharValue(),
+                        data.get(6).getVarCharValue()
+                ));
+            }
+            log.info("Finished writing response");
+            /*while (rs.next()) {
+                response.getWriter().println(String.format(
+                        "%s,%d,%d,%s,%s,%f,%d",
+                        rs.getString("reference_name"),
+                        rs.getLong("start_position"),
+                        rs.getLong("end_position"),
+                        rs.getString("reference_bases"),
+                        rs.getString("alternate_bases"),
+                        rs.getDouble("minor_af"),
+                        rs.getLong("allele_count")
+                ));
+            }*/
+        }
+
+        //JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        //jsonWriter.beginObject();
+        //jsonWriter.name("message").value("hello world");
+        //jsonWriter.endObject();
     }
 
 
@@ -309,7 +543,6 @@ public class Controller {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Gene name did not match regex filter");
             return;
         }
-
 
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         Callable<TableResult> gcpCallable = new Callable<TableResult>() {

@@ -9,9 +9,6 @@ import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.athena.AmazonAthenaClientBuilder;
 import com.amazonaws.services.athena.model.*;
 import com.amazonaws.services.s3.model.S3ObjectId;
-import com.amazonaws.services.s3.model.S3ObjectIdBuilder;
-import com.simba.athena.amazonaws.services.glue.model.Database;
-import com.simba.athena.amazonaws.services.glue.model.Table;
 import com.simba.athena.jdbc.Driver;
 import org.apache.logging.log4j.Logger;
 
@@ -27,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static app.dao.client.StringUtils.*;
 
-public class AthenaClient implements DatabaseClientInterface {
+public class AthenaClient {
     private static final Logger log = AppLogging.getLogger(AthenaClient.class);
 
     private AmazonAthena athena;
@@ -242,7 +239,7 @@ public class AthenaClient implements DatabaseClientInterface {
                 athena.startQueryExecution(startQueryExecutionRequest);
         String executionId = startQueryExecutionResult.getQueryExecutionId();
         log.info("Waiting for query execution " + executionId + " to finish");
-        waitForQueryExecution(executionId);
+        waitForQueryExecution(executionId, 5 * 60 * 1000);
         log.info("Query execution " + executionId + " finished");
 //        GetQueryResultsRequest getQueryResultsRequest =
 //                new GetQueryResultsRequest().withQueryExecutionId(executionId);
@@ -344,7 +341,7 @@ public class AthenaClient implements DatabaseClientInterface {
                                 .withOutputLocation(getOutputLocation()))
                 .withQueryString(query);
         StartQueryExecutionResult startResult = athena.startQueryExecution(startRequest);
-        waitForQueryExecution(startResult.getQueryExecutionId());
+        waitForQueryExecution(startResult.getQueryExecutionId(), 5 * 60 * 1000);
         log.debug("Created variant table " + fullTableName + " from s3 directory: " + s3DirectoryUrl);
     }
 
@@ -372,16 +369,36 @@ public class AthenaClient implements DatabaseClientInterface {
         if (variantQuery.getReferenceName() != null) {
             wheres.add("reference_name = " + prepareSqlString(variantQuery.getReferenceName()));
         }
-        if (variantQuery.getStartPosition() != null) {
-            wheres.add("start_position "
-                    + variantQuery.getStartPositionOperator()
-                    + " " + prepareSqlBigInt(variantQuery.getStartPosition()));
+        // Position parameters
+        if (variantQuery.getUsePositionAsRange()) {
+            // range based is a special case
+            String whereTerm =
+                    " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
+                    + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
+                    + " or (start_position < %s and end_position > %s))";
+            String start = variantQuery.getStartPosition() != null ?
+                    variantQuery.getStartPosition().toString()
+                    : "0";
+            String end = variantQuery.getEndPosition() != null ?
+                    variantQuery.getEndPosition().toString()
+                    : Long.valueOf(Long.MAX_VALUE).toString();
+            whereTerm = String.format(whereTerm,
+                    start, end, start, end, start, end);
+            wheres.add(whereTerm);
+
+        } else {
+            if (variantQuery.getStartPosition() != null) {
+                wheres.add("start_position "
+                        + variantQuery.getStartPositionOperator()
+                        + " " + prepareSqlBigInt(variantQuery.getStartPosition()));
+            }
+            if (variantQuery.getEndPosition() != null) {
+                wheres.add("end_position "
+                        + variantQuery.getEndPositionOperator()
+                        + " " + prepareSqlBigInt(variantQuery.getEndPosition()));
+            }
         }
-        if (variantQuery.getEndPosition() != null) {
-            wheres.add("end_position "
-                    + variantQuery.getEndPositionOperator()
-                    + " " + prepareSqlBigInt(variantQuery.getEndPosition()));
-        }
+
         if (variantQuery.getReferenceBases() != null) {
             wheres.add("reference_bases = " + prepareSqlString(variantQuery.getReferenceBases()));
         }
@@ -417,7 +434,7 @@ public class AthenaClient implements DatabaseClientInterface {
                 .withResultConfiguration(resultConfiguration);
         StartQueryExecutionResult startResult = athena.startQueryExecution(startRequest);
         String executionId = startResult.getQueryExecutionId();
-        waitForQueryExecution(executionId);
+        waitForQueryExecution(executionId, 5 * 60 * 1000);
         GetQueryResultsRequest getRequest = new GetQueryResultsRequest()
                 .withQueryExecutionId(executionId);
         GetQueryResultsResult getResult = athena.getQueryResults(getRequest);
@@ -448,19 +465,19 @@ public class AthenaClient implements DatabaseClientInterface {
         StartQueryExecutionResult startResult = athena.startQueryExecution(startRequest);
         String executionId = startResult.getQueryExecutionId();
         try {
-            waitForQueryExecution(executionId);
+            waitForQueryExecution(executionId, 5 * 60 * 1000);
         } catch (RuntimeException e) {
             e.printStackTrace();
         }
         log.info("Finished deleting table");
     }
 
-    private void waitForQueryExecution(String executionId) {
+    private void waitForQueryExecution(String executionId, long timeoutMilliseconds) {
         // wait for completion
         // TODO make these parameters
-        int intervalMillis = 2000;
-        int maxWaitMillis = 1000 * 60;
-        int waitedMillis = 0;
+        long intervalMillis = 2000;
+        long maxWaitMillis = timeoutMilliseconds;
+        long waitedMillis = 0;
         boolean done = false;
         while (!done) {
             GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
@@ -502,7 +519,7 @@ public class AthenaClient implements DatabaseClientInterface {
         }
     }
 
-    public ResultSet executeQueryToResultSet(String query) {
+    public com.amazonaws.services.athena.model.ResultSet executeQueryToResultSet(String query) {
         log.debug("executeQueryToResultSet: " + query);
         ResultConfiguration resultConfiguration = new ResultConfiguration()
                 .withOutputLocation(getOutputLocation());
@@ -513,58 +530,21 @@ public class AthenaClient implements DatabaseClientInterface {
         StartQueryExecutionResult startQueryExecutionResult =
                 athena.startQueryExecution(startQueryExecutionRequest);
         String executionId = startQueryExecutionResult.getQueryExecutionId();
-        /*GetQueryResultsRequest getQueryResultsRequest = new GetQueryResultsRequest()
-                .withQueryExecutionId(executionId);
 
-        // wait for completion
-        boolean done = false;
-        while (!done) {
-            GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
-                    .withQueryExecutionId(executionId);
-            GetQueryExecutionResult getQueryExecutionResult =
-                    athena.getQueryExecution(getQueryExecutionRequest);
-            String stateString = getQueryExecutionResult.getQueryExecution().getStatus().getState();
-            AthenaQueryStatus status = AthenaQueryStatus.valueOf(stateString);
-            switch (status) {
-                case SUCCEEDED: {
-                    done = true;
-                    break;
-                }
-                case RUNNING: {
-                    try {
-                        Thread.currentThread().sleep(2000);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
-                    break;
-                }
-                case QUEUED: {
-                    // still waiting
-                    System.out.println("Job still queued.");
-                    break;
-                }
-                case CANCELLED: {
-                    throw new RuntimeException("Job cancelled unexpectedly! " + getQueryExecutionResult.toString());
-                }
-                case FAILED: {
-                    throw new RuntimeException("Job failed! " + getQueryExecutionResult.toString());
-                }
-            }
-        }*/
-        waitForQueryExecution(executionId);
+        waitForQueryExecution(executionId, 20 * 60 * 1000);
         GetQueryResultsRequest getQueryResultsRequest = new GetQueryResultsRequest()
                 .withQueryExecutionId(executionId);
 
         // get results
         GetQueryResultsResult getQueryResultsResult = athena.getQueryResults(getQueryResultsRequest);
-        ResultSet rs = (ResultSet) getQueryResultsResult.getResultSet();
-        return rs;
+        return getQueryResultsResult.getResultSet();
+        //return rs;
     }
 
-    @Override
+    /*@Override
     public Iterable<Map<String, Object>> executeQuery(String query) {
         return resultSetToIterableMap(executeQueryToResultSet(query));
-    }
+    }*/
 
     private Iterable<Map<String,Object>> resultSetToIterableMap(ResultSet rs) {
         // get result set schema
@@ -614,8 +594,8 @@ public class AthenaClient implements DatabaseClientInterface {
 
     }
 
-    @Override
-    public long executeCount(String tableName, String fieldName, Object fieldValue) {
+    //@Override
+    /*public long executeCount(String tableName, String fieldName, Object fieldValue) {
         String query = String.format(
                 "select count(*) as ct"
                 + " from %s.%s",
@@ -635,9 +615,9 @@ public class AthenaClient implements DatabaseClientInterface {
         String ct = results.iterator().next().get("ct").toString();
         System.out.println("ct: " + ct);
         return Long.valueOf(ct);
-    }
+    }*/
 
-    @Override
+    //@Override
     public long executeCount(CountQuery countQuery, String tableName) {
         return -1;
     }

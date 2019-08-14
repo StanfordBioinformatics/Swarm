@@ -293,6 +293,8 @@ public class BigQueryClient implements DatabaseClientInterface {
         return fvl.get("ct").getLongValue();
     }
 
+
+
     @Override
     public Iterable<Map<String,Object>> executeQuery(String query) {
         TableResult tr;
@@ -342,30 +344,12 @@ public class BigQueryClient implements DatabaseClientInterface {
     }
 
     public TableResult runSimpleQuery(String sql) throws InterruptedException {
+        log.debug("Running simple query:\n" + sql);
         QueryJobConfiguration queryConfig =
-                QueryJobConfiguration.newBuilder(sql).build();
-
+                QueryJobConfiguration.newBuilder(sql)
+                        //.setAllowLargeResults(true) // requires setting a destination table
+                        .build();
         return runQueryJob(queryConfig);
-
-        // below uses a manually created jobId so it can be retried
-        /*// Create a job ID
-        JobId jobId = JobId.of(UUID.randomUUID().toString());
-        Job queryJob = bigquery.create(JobInfo.newBuilder(queryConfig).setJobId(jobId).build());
-
-        queryJob = queryJob.waitFor();
-
-        if (queryJob == null) {
-            throw new RuntimeException("Job does not exist!");
-        } else if (queryJob.getStatus().getError() != null) {
-            // You can also look at queryJob.getStatus().getExecutionErrors() for all
-            // errors, not just the latest one.
-            throw new RuntimeException(queryJob.getStatus().getError().toString());
-        }
-
-        // Get the results.
-        //QueryResponse response = bigquery.getQueryResults(jobId);
-        return queryJob.getQueryResults();
-        */
     }
 
     public void deleteTable(String tableName) {
@@ -405,11 +389,6 @@ public class BigQueryClient implements DatabaseClientInterface {
         return newTable;
     }
 
-    public String joinVariantTables(TableReference t1Ref, TableReference t2Ref) {
-        
-        return null;
-    }
-
 
     public QueryJobConfiguration variantQueryToQueryJobConfiguration(
             @NotNull VariantQuery variantQuery,
@@ -426,16 +405,39 @@ public class BigQueryClient implements DatabaseClientInterface {
             builder.addNamedParameter("referenceName",
                     QueryParameterValue.string(variantQuery.getReferenceName()));
         }
-        if (variantQuery.getStartPosition() != null) {
-            wheres.add("start_position " + variantQuery.getStartPositionOperator() + " @startPosition");
-            builder.addNamedParameter("startPosition",
-                    QueryParameterValue.int64(variantQuery.getStartPosition()));
+
+        // position parameters
+        if (variantQuery.getUsePositionAsRange()) {
+            // range based is a special case
+            // TODO convert to prepared statement format
+            String whereTerm =
+                    " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
+                            + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
+                            + " or (start_position < %s and end_position > %s))";
+            String start = variantQuery.getStartPosition() != null ?
+                    variantQuery.getStartPosition().toString()
+                    : "0";
+            String end = variantQuery.getEndPosition() != null ?
+                    variantQuery.getEndPosition().toString()
+                    : Long.valueOf(Long.MAX_VALUE).toString();
+            whereTerm = String.format(whereTerm,
+                    start, end, start, end, start, end);
+            wheres.add(whereTerm);
+
+        } else {
+            if (variantQuery.getStartPosition() != null) {
+                wheres.add("start_position " + variantQuery.getStartPositionOperator() + " @startPosition");
+                builder.addNamedParameter("startPosition",
+                        QueryParameterValue.int64(variantQuery.getStartPosition()));
+            }
+            if (variantQuery.getEndPosition() != null) {
+                wheres.add("end_position " + variantQuery.getEndPositionOperator() + " @endPosition");
+                builder.addNamedParameter("endPosition",
+                        QueryParameterValue.int64(variantQuery.getEndPosition()));
+            }
         }
-        if (variantQuery.getEndPosition() != null) {
-            wheres.add("end_position " + variantQuery.getEndPositionOperator() + " @endPosition");
-            builder.addNamedParameter("endPosition",
-                    QueryParameterValue.int64(variantQuery.getEndPosition()));
-        }
+
+
         if (variantQuery.getReferenceBases() != null) {
             wheres.add("reference_bases = @referenceBases");
             builder.addNamedParameter("referenceBases",
