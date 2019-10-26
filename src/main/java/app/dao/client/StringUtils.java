@@ -1,5 +1,6 @@
 package app.dao.client;
 
+import javax.validation.ValidationException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -65,5 +66,33 @@ public class StringUtils {
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    /**
+     * Quotes Athena database/table identifier string by period delimited parts.
+     * Athena only allows this syntax for SELECT statements.
+     * <br>
+     * eg: database.tablename becomes "database"."tablename"
+     * @param s input table identifier
+     */
+    public static String quoteAthenaTableIdentifier(String s) {
+        if (s == null) { return null; }
+        String[] terms = s.split("\\.");
+        for (int i = 0; i < terms.length; i++) {
+            terms[i] = "\"" + terms[i] + "\"";
+        }
+        return String.join(".", terms);
+    }
+
+    public static void disallowQuoteSemicolonSpace(String s) {
+        if (s.contains("'")) {
+            throw new ValidationException("String cannot contain single quotes: " + s);
+        }
+        if (s.contains(";")) {
+            throw new ValidationException("String cannot contain semicolon: " + s);
+        }
+        if (s.matches(".*\\s.*")) {
+            throw new ValidationException("String cannot contain whitespace: " + s);
+        }
     }
 }

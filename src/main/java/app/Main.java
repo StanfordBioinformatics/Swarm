@@ -10,24 +10,110 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.sql.SQLException;
-import java.util.Optional;
+import java.util.*;
 
 import static app.dao.client.StringUtils.getLastNonEmptySegmentOfPath;
 
 public class Main {
     public static void main(String[] args) throws SQLException, IOException {
-        /*AthenaClient athenaClient = new AthenaClient(
-                "swarm",
-                "aws.properties"
-        );
+        long duration;
+        LinkedList<Integer> linkedList = new LinkedList<>();
+        int listSize = 1000000; // 10 million
+        int testIter = 10000; // 1 million
+        for (int i = 0; i < listSize; i++) {
+            linkedList.add(i);
+        }
+        LinkedListIteratorCache<Integer> linkedListCached = new LinkedListIteratorCache<>();
+        for (int i = 0; i < listSize; i++) {
+            linkedListCached.add(i);
+        }
+        Random rand = new Random(System.currentTimeMillis());
+        int[] randIndexes = new int[testIter];
+        for (int i = 0; i < testIter; i++) {
+            randIndexes[i] = rand.nextInt(listSize);
+        }
 
-        String tableName = "temptable";
-        boolean exists = athenaClient.doesTableExist(tableName);
-        System.out.println("table " + tableName + " exists: " + exists);
+        int[] llic = new int[testIter];
+        int[] ll = new int[testIter];
 
-        athenaClient.deleteTable("temptable");*/
+        // SEQUENTIAL ACCESS
 
-        Main.athenaQuery();
+        duration = getSequential(linkedListCached, testIter, llic);
+        System.out.printf("LinkedListIteratorCache sequential: %d\n", duration);
+
+        duration = getSequential(linkedList, testIter, ll);
+        System.out.printf("LinkedList sequential: %d\n", duration);
+
+        // Assert equal results
+        for (int i = 0; i < testIter; i++) {
+            assert (ll[i] == llic[i]);
+        }
+
+
+        // RANDOM ACCESS
+        duration = getRandom(linkedListCached, testIter, llic, randIndexes);
+        System.out.printf("LinkedListIteratorCache random: %d\n", duration);
+
+        duration = getRandom(linkedList, testIter, ll, randIndexes);
+        System.out.printf("LinkedList random: %d\n", duration);
+
+        // Assert equal results
+        for (int i = 0; i < testIter; i++) {
+            assert(ll[i] == llic[i]);
+        }
+    }
+
+    public static long getSequential(List<Integer> list, int testIter, int[] output) {
+        long start, end;
+        start = System.currentTimeMillis();
+        for (int i = 0; i < testIter; i++) {
+            int val = list.get(i);
+            output[i] = val;
+        }
+        end = System.currentTimeMillis();
+        return end - start;
+    }
+
+    public static long getRandom(List<Integer> list, int testIter, int[] output, int[] randIndexes) {
+        long start, end;
+        start = System.currentTimeMillis();
+        for (int i = 0; i < testIter; i++) {
+            if (i % 1000 == 0) {
+                System.out.printf("%d ", i);
+            }
+            int val = list.get(randIndexes[i]);
+            output[i] = val;
+        }
+        System.out.println();
+        end = System.currentTimeMillis();
+        return end - start;
+    }
+
+    public static class LinkedListIteratorCache<E> extends LinkedList<E> {
+        private ListIterator<E> iterator = null;
+        private int iteratorIdx = 0;
+
+        private Object lock = new Object();
+
+        @Override
+        public E get(int index) {
+            synchronized (lock) {
+                if (this.iterator != null) {
+                    if (this.iterator.nextIndex() == index) {
+                        return this.iterator.next();
+                    } else if (this.iterator.previousIndex() == index) {
+                        return this.iterator.previous();
+                    }
+                }
+                if (this.iterator == null) {
+                    this.iterator = this.listIterator(index);
+                    return super.get(index);
+                }
+
+                this.iterator = this.listIterator(index);
+                return this.iterator.next();
+            }
+        }
     }
 
     public static void s3Upload() throws IOException {

@@ -11,11 +11,13 @@ import com.google.cloud.storage.StorageOptions;
 import org.apache.logging.log4j.Logger;
 
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Scanner;
 
 import static app.dao.client.StringUtils.ensureTrailingSlash;
 
@@ -60,8 +62,11 @@ public class GCSClient {
      * to an existing object readable with the loaded client credentials.
      * @param blobId
      */
-    public InputStream getInputStream(BlobId blobId) {
+    public InputStream getInputStream(BlobId blobId) throws FileNotFoundException {
         Blob blob = storage.get(blobId);
+        if (blob == null) {
+            throw new FileNotFoundException(blobId.toString());
+        }
         ReadChannel readChannel = blob.reader();
         return Channels.newInputStream(readChannel);
     }
@@ -70,7 +75,7 @@ public class GCSClient {
      * Parses url into BlobId, delegates to GCSClient#getInputStream(BlobId)
      * @param url
      */
-    public InputStream getInputStream(String url) {
+    public InputStream getInputStream(String url) throws FileNotFoundException {
         return getInputStream(urlToBlobId(url));
     }
 
@@ -109,6 +114,18 @@ public class GCSClient {
             }
         }
         return results;
+    }
+
+    public String getFirstLineOfFile(String objectUrl) throws IOException {
+        try (InputStream is = this.getInputStream(objectUrl);
+             Scanner scany = new Scanner(is);)
+        {
+            if (!scany.hasNextLine()) {
+                throw new IOException("Failed to read line from GCS object: " + objectUrl);
+            }
+            String s = scany.nextLine();
+            return s;
+        }
     }
 
     public List<BlobId> listDirectory(String directoryUrl) {

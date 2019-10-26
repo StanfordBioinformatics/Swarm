@@ -53,6 +53,9 @@ public class AthenaClient {
         }
     }
 
+    //private HashMap<String,String> executionIdToLocation = new HashMap<>();
+    private HashMap<String,String> tableNameToLocation = new HashMap<>();
+
     public AthenaClient(String databaseName, String credentialPath) {
         // load configuration
         Properties credProperties = new Properties();
@@ -234,7 +237,7 @@ public class AthenaClient {
                 variantQueryToStartQueryExecutionRequest(
                         variantQuery,
                         resultConfiguration,
-                        combinedDestTable);
+                        Optional.of(combinedDestTable));
         StartQueryExecutionResult startQueryExecutionResult =
                 athena.startQueryExecution(startQueryExecutionRequest);
         String executionId = startQueryExecutionResult.getQueryExecutionId();
@@ -261,6 +264,7 @@ public class AthenaClient {
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
+
     private String prepareSqlString(String s) {
         return "'" + escapeQuotes(s) + "'";
     }
@@ -281,89 +285,33 @@ public class AthenaClient {
         return s.replaceAll("'", "\\'");
     }
 
-    /**
-     * Quotes Athena database/table identifier string by period delimited parts.
-     * Athena only allows this syntax for SELECT statements.
-     * <br>
-     * eg: database.tablename becomes "database"."tablename"
-     * @param s input table identifier
-     */
-    private String quoteAthenaTableIdentifier(String s) {
-        if (s == null) { return null; }
-        String[] terms = s.split("\\.");
-        for (int i = 0; i < terms.length; i++) {
-            terms[i] = "\"" + terms[i] + "\"";
-        }
-        return String.join(".", terms);
-    }
-
-    private void disallowQuoteSemicolonSpace(String s) {
-        if (s.contains("'")) {
-            throw new ValidationException("String cannot contain single quotes: " + s);
-        }
-        if (s.contains(";")) {
-            throw new ValidationException("String cannot contain semicolon: " + s);
-        }
-        if (s.matches(".*\\s.*")) {
-            throw new ValidationException("String cannot contain whitespace: " + s);
-        }
-    }
 
 
-    public void createVariantTableFromS3(String shortTableName, String s3DirectoryUrl) {
-        log.debug("createVariantTableFromS3(" + shortTableName + ", " + s3DirectoryUrl + ")");
-        disallowQuoteSemicolonSpace(shortTableName);
-        disallowQuoteSemicolonSpace(s3DirectoryUrl);
-        String fullTableName = this.databaseName + "." + shortTableName;
-        String query = "";
-        List<String> fields = new ArrayList<>();
-        fields.add("`reference_name` string");
-        fields.add("`start_position` bigint");
-        fields.add("`end_position` bigint");
-        fields.add("`reference_bases` string");
-        fields.add("`alternate_bases` string");
-        fields.add("`minor_af` double");
-        fields.add("`allele_count` bigint");
-        String fieldString = String.join(",\n", fields);
-
-        query += "CREATE EXTERNAL TABLE IF NOT EXISTS " +
-                fullTableName +
-                " (" + fieldString + ")\n" +
-                "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\n" +
-                "WITH SERDEPROPERTIES (\n" +
-                "  'serialization.format' = ',',\n" +
-                "  'field.delim' = ','\n" +
-                ") LOCATION '" + s3DirectoryUrl + "'\n" +
-                "TBLPROPERTIES ('has_encrypted_data'='false');";
-        StartQueryExecutionRequest startRequest = new StartQueryExecutionRequest()
-                .withResultConfiguration(
-                        new ResultConfiguration()
-                                .withOutputLocation(getOutputLocation()))
-                .withQueryString(query);
-        StartQueryExecutionResult startResult = athena.startQueryExecution(startRequest);
-        waitForQueryExecution(startResult.getQueryExecutionId(), 5 * 60 * 1000);
-        log.debug("Created variant table " + fullTableName + " from s3 directory: " + s3DirectoryUrl);
-    }
 
     public StartQueryExecutionRequest variantQueryToStartQueryExecutionRequest(
             @NotNull VariantQuery variantQuery,
             @NotNull ResultConfiguration resultConfiguration,
-            @NotNull String destinationTableName) {
+            @NotNull Optional<String> destinationTableName) {
         StartQueryExecutionRequest startQueryExecutionRequest = new StartQueryExecutionRequest();
         startQueryExecutionRequest.setResultConfiguration(resultConfiguration);
 
         StringBuilder sb = new StringBuilder();
         String quotedTable = quoteAthenaTableIdentifier(
                 this.databaseName + "." + variantQuery.getTableIdentifier());
-        String quotedDestTable = quoteAthenaTableIdentifier(destinationTableName);
-        // https://docs.aws.amazon.com/athena/latest/ug/create-table-as.html#ctas-table-properties
         String with = "with(format='TEXTFILE', field_delimiter=',')"; // automatically uses GZIP
+        if (destinationTableName.isPresent()) {
+            String quotedDestTable = quoteAthenaTableIdentifier(destinationTableName.get());
+            // https://docs.aws.amazon.com/athena/latest/ug/create-table-as.html#ctas-table-properties
+            sb.append(String.format(
+                    "create table %s %s as ",
+                    quotedDestTable,
+                    with
+            ));
+        }
         sb.append(String.format(
-                "create table %s %s as select * from %s",
-                quotedDestTable,
-                with,
-                quotedTable
-        ));
+                "select %s from %s",
+                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
+                quotedTable));
 
         List<String> wheres = new ArrayList<>();
         if (variantQuery.getReferenceName() != null) {
@@ -374,8 +322,8 @@ public class AthenaClient {
             // range based is a special case
             String whereTerm =
                     " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
-                    + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
-                    + " or (start_position < %s and end_position > %s))";
+                            + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
+                            + " or (start_position < %s and end_position > %s))";
             String start = variantQuery.getStartPosition() != null ?
                     variantQuery.getStartPosition().toString()
                     : "0";
@@ -425,6 +373,42 @@ public class AthenaClient {
         return startQueryExecutionRequest;
     }
 
+
+    public void createVariantTableFromS3(String shortTableName, String s3DirectoryUrl) {
+        log.debug("createVariantTableFromS3(" + shortTableName + ", " + s3DirectoryUrl + ")");
+        disallowQuoteSemicolonSpace(shortTableName);
+        disallowQuoteSemicolonSpace(s3DirectoryUrl);
+        String fullTableName = this.databaseName + "." + shortTableName;
+        String query = "";
+        List<String> fields = new ArrayList<>();
+        fields.add("`reference_name` string");
+        fields.add("`start_position` bigint");
+        fields.add("`end_position` bigint");
+        fields.add("`reference_bases` string");
+        fields.add("`alternate_bases` string");
+        fields.add("`minor_af` double");
+        fields.add("`allele_count` bigint");
+        String fieldString = String.join(",\n", fields);
+
+        query += "CREATE EXTERNAL TABLE IF NOT EXISTS " +
+                fullTableName +
+                " (" + fieldString + ")\n" +
+                "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\n" +
+                "WITH SERDEPROPERTIES (\n" +
+                "  'serialization.format' = ',',\n" +
+                "  'field.delim' = ','\n" +
+                ") LOCATION '" + s3DirectoryUrl + "'\n" +
+                "TBLPROPERTIES ('has_encrypted_data'='false');";
+        StartQueryExecutionRequest startRequest = new StartQueryExecutionRequest()
+                .withResultConfiguration(
+                        new ResultConfiguration()
+                                .withOutputLocation(getOutputLocation()))
+                .withQueryString(query);
+        StartQueryExecutionResult startResult = athena.startQueryExecution(startRequest);
+        waitForQueryExecution(startResult.getQueryExecutionId(), 5 * 60 * 1000);
+        log.debug("Created variant table " + fullTableName + " from s3 directory: " + s3DirectoryUrl);
+    }
+
     public boolean doesTableExist(String tableName) {
         disallowQuoteSemicolonSpace(tableName);
         ResultConfiguration resultConfiguration = new ResultConfiguration()
@@ -472,6 +456,16 @@ public class AthenaClient {
         log.info("Finished deleting table");
     }
 
+    /**
+     * Waits timeoutMilliseconds until the BigQuery query with executionId has
+     * completed, failed, or has been cancelled.
+     * <br>
+     * Caller can then look up the results.
+     *
+     * @param executionId id of this query execution in BigQuery
+     * @param timeoutMilliseconds maximum number of milliseconds to wait. If exceeded, an
+     *                            exception is thrown
+     */
     private void waitForQueryExecution(String executionId, long timeoutMilliseconds) {
         // wait for completion
         // TODO make these parameters
@@ -519,7 +513,14 @@ public class AthenaClient {
         }
     }
 
-    public com.amazonaws.services.athena.model.ResultSet executeQueryToResultSet(String query) {
+    /**
+     * Executes the sql string and returns a com.amazonaws.services.athena.model.ResultSet
+     * <br>
+     * TODO create converter class from com.amazonaws.services.athena.model.ResultSet to java.sql.ResultSet
+     *
+     * @param query sql string to execute
+     */
+    public GetQueryResultsResult executeQueryToResultSet(String query) {
         log.debug("executeQueryToResultSet: " + query);
         ResultConfiguration resultConfiguration = new ResultConfiguration()
                 .withOutputLocation(getOutputLocation());
@@ -537,8 +538,34 @@ public class AthenaClient {
 
         // get results
         GetQueryResultsResult getQueryResultsResult = athena.getQueryResults(getQueryResultsRequest);
-        return getQueryResultsResult.getResultSet();
+        //return getQueryResultsResult.getResultSet();
+        return getQueryResultsResult;
         //return rs;
+    }
+
+    public S3ObjectId executeQueryToObjectId(@NotNull String query) {
+        //String nonce = randomAlphaNumStringOfLength(16);
+        //String outputDir = pathJoin(getOutputLocation(), nonce);
+        String outputLocation = getOutputLocation();
+        log.debug("Executing query and placing results in: " + outputLocation);
+        ResultConfiguration resultConfiguration = new ResultConfiguration()
+                .withOutputLocation(outputLocation);
+        StartQueryExecutionRequest startQueryExecutionRequest = new StartQueryExecutionRequest();
+        startQueryExecutionRequest.setQueryString(query);
+        startQueryExecutionRequest.setResultConfiguration(resultConfiguration);
+        // begin query execution
+        StartQueryExecutionResult startQueryExecutionResult =
+                athena.startQueryExecution(startQueryExecutionRequest);
+        String executionId = startQueryExecutionResult.getQueryExecutionId();
+        waitForQueryExecution(executionId, 20 * 60 * 1000);
+
+        //GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
+        //        .withQueryExecutionId(executionId);
+        String tableFilesUrl = pathJoin(outputLocation, "tables");
+        tableFilesUrl = pathJoin(tableFilesUrl, executionId);
+        log.info("Output results should be available in: " + tableFilesUrl);
+        S3PathParser parser = new S3PathParser(tableFilesUrl);
+        return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
     /*@Override
@@ -617,9 +644,33 @@ public class AthenaClient {
         return Long.valueOf(ct);
     }*/
 
-    //@Override
-    public long executeCount(CountQuery countQuery, String tableName) {
-        return -1;
+
+
+    public long executeCount(VariantQuery variantQuery) {
+        if (!variantQuery.getCountOnly()) {
+            throw new IllegalArgumentException("VariantQuery did not have countOnly set");
+        }
+        ResultConfiguration resultConfiguration = new ResultConfiguration()
+                .withOutputLocation(getOutputLocation());
+        StartQueryExecutionRequest startQueryExecutionRequest =
+                this.variantQueryToStartQueryExecutionRequest(
+                        variantQuery, resultConfiguration, Optional.empty());
+        StartQueryExecutionResult startQueryExecutionResult =
+                athena.startQueryExecution(startQueryExecutionRequest);
+        String executionId = startQueryExecutionResult.getQueryExecutionId();
+        this.waitForQueryExecution(executionId, 5 * 60 * 1000);
+        GetQueryResultsRequest getQueryResultsRequest = new GetQueryResultsRequest()
+                .withQueryExecutionId(executionId);
+        GetQueryResultsResult getQueryResultsResult = athena.getQueryResults(getQueryResultsRequest);
+        List<Row> rows = getQueryResultsResult
+                .getResultSet()
+                .getRows();
+        // row 0 is header, skip and get 'ct' field (col 0)
+        String ct = rows.get(1) // first data row
+                .getData()
+                .get(0) // column
+                .getVarCharValue();
+        return Long.parseLong(ct);
     }
 
     public PreparedStatement countQueryToAthenaStatement(

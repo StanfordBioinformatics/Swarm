@@ -19,6 +19,8 @@ public class VariantQuery {
 
     private boolean usePositionAsRange = false;
 
+    private boolean countOnly = false;
+
     private String tableIdentifier;
     //private boolean usePositionAsRange = false;
 
@@ -195,5 +197,13 @@ public class VariantQuery {
 
     public String getTableIdentifier() {
         return this.tableIdentifier;
+    }
+
+    public void setCountOnly(boolean countOnly) {
+        this.countOnly = countOnly;
+    }
+
+    public boolean getCountOnly() {
+        return this.countOnly;
     }
 }

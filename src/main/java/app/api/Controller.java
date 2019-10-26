@@ -4,13 +4,10 @@ import app.AppLogging;
 import app.dao.client.*;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
-//import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
-import com.amazonaws.services.athena.model.Datum;
-import com.amazonaws.services.athena.model.Row;
+import com.amazonaws.services.athena.model.*;
 import com.amazonaws.services.s3.model.S3ObjectId;
-import com.google.api.services.bigquery.model.TableDataInsertAllRequest;
 import com.google.cloud.bigquery.*;
 import com.google.cloud.storage.BlobId;
 import com.google.gson.stream.JsonWriter;
@@ -20,12 +17,18 @@ import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
+import javax.annotation.Nullable;
 import javax.json.*;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpServletResponseWrapper;
 import javax.validation.ValidationException;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -94,100 +97,35 @@ public class Controller {
         public Long endPosition;
     }
 
-    @RequestMapping(
-            value = "/variants_by_gene/{gene_label}",
-            method = {RequestMethod.GET}
-    )
-    public void getVariantsByGene(
+
+    @RequestMapping(value = "/stat_by_gene/{gene_label}", method = {RequestMethod.GET})
+    public void getStatByGene(
             @PathVariable("gene_label") String geneLabel,
             HttpServletRequest request, HttpServletResponse response
-    ) throws IOException, SQLException, InterruptedException {
-        Pattern geneNamePattern = Pattern.compile("[a-zA-Z0-9]+");
-        Matcher geneNameMatcher = geneNamePattern.matcher(geneLabel);
-        if (!geneNameMatcher.matches()) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Gene name did not match regex filter");
-            return;
-        }
-
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
-        Callable<GeneCoordinate> geneLookupCallable = new Callable<GeneCoordinate>() {
-            @Override
-            public GeneCoordinate call() throws Exception {
-                // get gene coordinates
-                String coordSql =
-                        "select chromosome, start_position, end_position"
-                                + " from swarm.relevant_genes_view_hg19"
-                                + " where gene_name = ?";
-                QueryJobConfiguration coordJobConfig = QueryJobConfiguration.newBuilder(coordSql)
-                        .addPositionalParameter(QueryParameterValue.string(geneLabel))
-                        .build();
-                TableResult coordTr = getBigQueryClient().runQueryJob(coordJobConfig);
-                assert(coordTr.getTotalRows() == 1);
-                FieldValueList fieldValues = coordTr.iterateAll().iterator().next();
-                GeneCoordinate coordinate = new GeneCoordinate();
-                coordinate.referenceName = fieldValues.get("chromosome").getStringValue();
-                coordinate.startPosition = fieldValues.get("start_position").getLongValue();
-                coordinate.endPosition = fieldValues.get("end_position").getLongValue();
-
-                System.out.printf("Gene %s has hg19 coordinates %s:%d-%d\n",
-                        geneLabel, coordinate.referenceName, coordinate.startPosition, coordinate.endPosition);
-                return coordinate;
-            }
-        };
-
-        final GeneCoordinate geneCoordinate;
-        Future<GeneCoordinate> coordinateFuture = executorService.submit(geneLookupCallable);
-        try {
-            geneCoordinate = coordinateFuture.get(3 * 60, TimeUnit.SECONDS);
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            e.printStackTrace();
-            response.sendError(500, "Failed to determine gene coordinates");
-            return;
-        }
-
-        log.info("Delegating to Controller.getVariants");
-        this.getVariants(
-                geneCoordinate.referenceName,
-                geneCoordinate.startPosition.toString(),
-                geneCoordinate.endPosition.toString(),
-                null,
-                null,
-                "true",
-                request,
-                response);
-
-        /*
-        // Run query for variants within intersection table overlapping with gene
-                String matchSql =
-                        "select reference_name, start_position, end_position, reference_bases, alternate_bases, minor_af"
-                                + " from swarm.1000genomes_vcf_half1 "
-                                + " where reference_name = ? "
-                                + " and "
-                                + " ((start_position >= ? and start_position <= ?)" // start pos overlaps gene
-                                + " or (end_position >= ? and end_position <= ?)" // end pos overlaps gene
-                                + " or (start_position < ? and end_position > ?))"; // variant is larger than gene
-
-                QueryJobConfiguration matchJobConfig = QueryJobConfiguration.newBuilder(matchSql)
-                        .addPositionalParameter(QueryParameterValue.string(chromosome))
-                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
-                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
-                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
-                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
-                        .addPositionalParameter(QueryParameterValue.int64(startPosition))
-                        .addPositionalParameter(QueryParameterValue.int64(endPosition))
-                        .build();
-                TableResult tr = getBigQueryClient().runQueryJob(matchJobConfig);
-                log.info("finished gcp variant query");
-                return tr;
-         */
+    ) throws InterruptedException, ExecutionException, TimeoutException, IOException {
+        GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+        String referenceName = geneCoordinate.referenceName;
+        String startPosition = geneCoordinate.startPosition.toString();
+        String endPosition = geneCoordinate.endPosition.toString();
+        String referenceBases = null;
+        String alternateBases = null;
+        String positionRange = "true";
+        log.info("Delegating stat_by_gene to getStat");
+        this.getStat(
+                referenceName,
+                startPosition, endPosition,
+                referenceBases, alternateBases,
+                positionRange,
+                request, response
+        );
     }
 
-    @RequestMapping(
-            value = "/variants",
-            method = {RequestMethod.GET}
-    )
-    public void getVariants(
-            //@RequestParam(required = false, name = "cloud", defaultValue = "all") String cloudParam,
+    /**
+     * Use Case 1, Stat query. Checks for existence of variants.
+     *
+     */
+    @RequestMapping(value = "/stat", method = {RequestMethod.GET})
+    public void getStat(
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
             @RequestParam(required = false, name = "start_position") String startPositionParam,
             @RequestParam(required = false, name = "end_position") String endPositionParam,
@@ -195,7 +133,65 @@ public class Controller {
             @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
             @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
             HttpServletRequest request, HttpServletResponse response
-    ) throws IOException, SQLException, InterruptedException {
+    ) throws IOException, InterruptedException, ExecutionException, TimeoutException {
+        doCountOrStat(
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                Optional.of(true), // statOnly = true
+                request,
+                response);
+    }
+
+    /**
+     * Use Case 2, Count query.  Checks for matches
+     * @param referenceNameParam
+     * @param startPositionParam
+     * @param endPositionParam
+     * @param referenceBasesParam
+     * @param alternateBasesParam
+     * @param positionRange
+     * @param request
+     * @param response
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    @RequestMapping(value = "/count", method = {RequestMethod.GET})
+    public void getCount(
+            @RequestParam(required = false, name = "reference_name") String referenceNameParam,
+            @RequestParam(required = false, name = "start_position") String startPositionParam,
+            @RequestParam(required = false, name = "end_position") String endPositionParam,
+            @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
+            @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
+            //@Nullable Optional<Boolean> statOnly,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, InterruptedException, TimeoutException, ExecutionException {
+        doCountOrStat(
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                Optional.of(false), // statOnly = false
+                request,
+                response);
+    }
+
+    public void doCountOrStat(
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            @Nullable Optional<Boolean> statOnly,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, InterruptedException, ExecutionException, TimeoutException {
         VariantQuery variantQuery = new VariantQuery();
         try {
             if (!StringUtils.isEmpty(positionRange)) {
@@ -231,11 +227,227 @@ public class Controller {
                 validateBasesString(alternateBasesParam);
                 variantQuery.setAlternateBases(alternateBasesParam);
             }
-            /*if (!StringUtils.isEmpty(positionRangeParam)) {
-                Boolean positionRange = validateBooleanParam(positionRangeParam);
-                countQuery.setUsePositionAsRange(positionRange);
-            }*/
+        } catch (ValidationException e) {
+            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+            return;
+        }
+        variantQuery.setTableIdentifier("variants");
 
+        // set it to only count the matching records, not return them
+        variantQuery.setCountOnly(true);
+
+        Callable<Long> athenaCallable = new Callable<Long>() {
+            @Override
+            public Long call() throws Exception {
+                return athenaClient.executeCount(variantQuery);
+            }
+        };
+        Callable<Long> bigqueryCallable = new Callable<Long>() {
+            @Override
+            public Long call() throws Exception {
+                return bigQueryClient.executeCount(variantQuery);
+            }
+        };
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+
+        log.info("Submitting athena query");
+        Future<Long> athenaFuture = executorService.submit(athenaCallable);
+        log.info("Submitting bigquery query");
+        Future<Long> bigqueryFuture = executorService.submit(bigqueryCallable);
+        Long athenaCount = null;
+        Long bigqueryCount = null;
+
+        log.debug("Shutting down executor service");
+        executorService.shutdown();
+        try {
+            long execTimeoutSeconds = 60 * 3;
+            log.info("Waiting " + execTimeoutSeconds + " seconds for query threads to complete");
+            executorService.awaitTermination(execTimeoutSeconds, TimeUnit.SECONDS);
+            log.info("Successfully shut down executor service");
+        } catch (InterruptedException e) {
+            response.sendError(
+                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                    "Query executor was interrupted unexpectedly");
+            return;
+        }
+
+        log.debug("Getting query result counts");
+        try {
+            long getTimeoutSeconds = 60;
+            athenaCount = athenaFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+            log.info("Got athena count: " + athenaCount);
+            bigqueryCount = bigqueryFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+            log.info("Got bigquery count: " + bigqueryCount);
+        } catch (ExecutionException | InterruptedException | TimeoutException e) {
+            //e.printStackTrace();
+            response.sendError(
+                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                    "Failed to retrieve query counts");
+            throw e;
+        }
+        PrintWriter pw = response.getWriter();
+        pw.write("Athena,BigQuery\n");
+        if (statOnly == null || !statOnly.isPresent()) {
+            log.debug("Writing count results");
+            pw.write(String.format("%d,%d\n", athenaCount, bigqueryCount));
+        } else {
+            log.debug("Writing stat results");
+            pw.write(String.format("%s,%s\n",
+                    athenaCount > 0 ? "true" : "false",
+                    bigqueryCount > 0 ? "true" : "false"));
+        }
+
+        log.debug("Wrote results to response stream");
+    }
+
+
+    @RequestMapping(
+            value = "/variants_by_gene/{gene_label}",
+            method = {RequestMethod.GET}
+    )
+    public void getVariantsByGene(
+            @PathVariable("gene_label") String geneLabel,
+            @PathVariable("sourceCloud") String sourceCloud,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, SQLException, InterruptedException, TimeoutException, ExecutionException {
+
+        GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+        if (geneCoordinate == null) {
+            throw new IllegalArgumentException("Gene could not be found in coordinates table");
+        }
+        log.info("Delegating to Controller.getVariants");
+
+        this.getVariants(
+                sourceCloud,
+                geneCoordinate.referenceName,
+                geneCoordinate.startPosition.toString(),
+                geneCoordinate.endPosition.toString(),
+                null,
+                null,
+                "true",
+                request,
+                response);
+    }
+
+    private GeneCoordinate getGeneCoordinates(String geneLabel) throws InterruptedException, ExecutionException, TimeoutException {
+        Pattern geneNamePattern = Pattern.compile("[a-zA-Z0-9]+");
+        Matcher geneNameMatcher = geneNamePattern.matcher(geneLabel);
+        if (!geneNameMatcher.matches()) {
+            throw new ValidationException("Gene name did not match regex filter");
+            //response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Gene name did not match regex filter");
+            //return;
+        }
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+        Callable<GeneCoordinate> geneLookupCallable = new Callable<GeneCoordinate>() {
+            @Override
+            public GeneCoordinate call() throws Exception {
+                // get gene coordinates
+                String coordSql =
+                        "select chromosome, start_position, end_position"
+                                + " from swarm.relevant_genes_view_hg19"
+                                + " where gene_name = ?";
+                QueryJobConfiguration coordJobConfig = QueryJobConfiguration.newBuilder(coordSql)
+                        .addPositionalParameter(QueryParameterValue.string(geneLabel))
+                        .build();
+                TableResult coordTr = getBigQueryClient().runQueryJob(coordJobConfig);
+                assert(coordTr.getTotalRows() == 1);
+                Iterator<FieldValueList> fieldValueListIterator = coordTr.iterateAll().iterator();
+                if (!fieldValueListIterator.hasNext()) {
+                    log.warn("No coordinate found for gene: " + geneLabel);
+                    return null;
+                }
+                FieldValueList fieldValues = fieldValueListIterator.next();
+                GeneCoordinate coordinate = new GeneCoordinate();
+                coordinate.referenceName = fieldValues.get("chromosome").getStringValue();
+                coordinate.startPosition = fieldValues.get("start_position").getLongValue();
+                coordinate.endPosition = fieldValues.get("end_position").getLongValue();
+
+                System.out.printf("Gene %s has hg19 coordinates %s:%d-%d\n",
+                        geneLabel, coordinate.referenceName, coordinate.startPosition, coordinate.endPosition);
+                return coordinate;
+            }
+        };
+
+        final GeneCoordinate geneCoordinate;
+        Future<GeneCoordinate> coordinateFuture = executorService.submit(geneLookupCallable);
+        executorService.shutdown();
+        try {
+            geneCoordinate = coordinateFuture.get(3 * 60, TimeUnit.SECONDS);
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            //e.printStackTrace();
+            //response.sendError(500, "Failed to determine gene coordinates");
+            //return;
+            throw e;
+        }
+        // this could be null if no coordinate is found
+        return geneCoordinate;
+    }
+
+    /**
+     * Use Case 3: computing allele frequency across data sets
+     * @param referenceNameParam
+     * @param startPositionParam
+     * @param endPositionParam
+     * @param referenceBasesParam
+     * @param alternateBasesParam
+     * @param positionRange
+     * @param request
+     * @param response
+     * @throws IOException
+     * @throws SQLException
+     * @throws InterruptedException
+     */
+    @RequestMapping(
+            value = "/variants",
+            method = {RequestMethod.GET}
+    )
+    public void getVariants(
+            @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
+            @RequestParam(required = false, name = "reference_name") String referenceNameParam,
+            @RequestParam(required = false, name = "start_position") String startPositionParam,
+            @RequestParam(required = false, name = "end_position") String endPositionParam,
+            @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
+            @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, SQLException, InterruptedException {
+        VariantQuery variantQuery = new VariantQuery();
+        try {
+            if (!StringUtils.isEmpty(positionRange)) {
+                if (positionRange.equalsIgnoreCase("true")) {
+                    log.debug("Using positions as a range");
+                    variantQuery.setUsePositionAsRange();
+                } else if (positionRange.equalsIgnoreCase("false")) {
+                    // nothing
+                } else {
+                    throw new ValidationException("Invalid param for position_range, must be true or false");
+                }
+            }
+            if (!StringUtils.isEmpty(sourceCloud)) {
+                validateCloudParam(sourceCloud);
+            }
+            if (!StringUtils.isEmpty(referenceNameParam)) {
+                validateReferenceName(referenceNameParam);
+                variantQuery.setReferenceName(referenceNameParam);
+            }
+            if (!StringUtils.isEmpty(startPositionParam)) {
+                Long startPosition = validateLongString(startPositionParam);
+                variantQuery.setStartPosition(startPosition);
+            }
+            if (!StringUtils.isEmpty(endPositionParam)) {
+                Long endPosition = validateLongString(endPositionParam);
+                variantQuery.setEndPosition(endPosition);
+            }
+            if (!StringUtils.isEmpty(referenceBasesParam)) {
+                validateBasesString(referenceBasesParam);
+                variantQuery.setReferenceBases(referenceBasesParam);
+            }
+            if (!StringUtils.isEmpty(alternateBasesParam)) {
+                validateBasesString(alternateBasesParam);
+                variantQuery.setAlternateBases(alternateBasesParam);
+            }
         } catch (ValidationException e) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
             return;
@@ -278,11 +490,28 @@ public class Controller {
 
         ExecutorService executorService = Executors.newFixedThreadPool(2);
 
-        // TODO
-        log.info("Submitting athena query");
-        Future<S3ObjectId> athenaFuture = executorService.submit(athenaCallable);
-        log.info("Submitting bigquery query");
-        Future<BlobId> bigqueryFuture = executorService.submit(bigqueryCallable);
+        boolean doBigquery = false, doAthena = false, doAll = false;
+        if (sourceCloud.equals("athena") || sourceCloud.equals("all")) {
+            doAthena = true;
+        }
+        if (sourceCloud.equals("bigquery") || sourceCloud.equals("all")) {
+            doBigquery = true;
+        }
+        if (sourceCloud.equals("all")) {
+            doAll = true;
+        }
+
+        Future<S3ObjectId> athenaFuture = null;
+        if (doAthena) {
+            log.info("Submitting athena query");
+            athenaFuture = executorService.submit(athenaCallable);
+        }
+        Future<BlobId> bigqueryFuture = null;
+        if (doBigquery) {
+            log.info("Submitting bigquery query");
+            bigqueryFuture = executorService.submit(bigqueryCallable);
+        }
+
         S3ObjectId athenaResultLocation = null;
         BlobId bigqueryResultLocation = null;
 
@@ -302,11 +531,15 @@ public class Controller {
 
         log.debug("Getting query result locations");
         try {
-            long getTimeoutSeconds = 60 * 1;
-            athenaResultLocation = athenaFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
-            log.info("Got athena result location");
-            bigqueryResultLocation = bigqueryFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
-            log.info("Got bigquery result location");
+            long getTimeoutSeconds = 60;
+            if (doAthena) {
+                athenaResultLocation = athenaFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+                log.info("Got athena result location");
+            }
+            if (doBigquery) {
+                bigqueryResultLocation = bigqueryFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+                log.info("Got bigquery result location");
+            }
         } catch (ExecutionException | InterruptedException | TimeoutException e) {
             e.printStackTrace();
             response.sendError(
@@ -315,17 +548,38 @@ public class Controller {
             return;
         }
 
-        String athenaResultDirectoryUrl = s3Client.s3ObjectIdToString(athenaResultLocation);
-        String bigqueryResultDirectoryUrl = gcsClient.blobIdToString(bigqueryResultLocation);
+        String athenaResultDirectoryUrl = null, bigqueryResultDirectoryUrl = null;
+        long athenaResultSize = -1, bigqueryResultSize = -1;
 
-        // determine sizes of each
-        log.info("Getting directory sizes");
-        long athenaResultSize = s3Client.getDirectorySize(athenaResultDirectoryUrl);
-        long bigqueryResultSize = gcsClient.getDirectorySize(bigqueryResultDirectoryUrl);
-        log.info("athena result size: " + athenaResultSize);
-        log.info("bigquery result size: " + bigqueryResultSize);
+        if (doAthena) {
+            athenaResultDirectoryUrl = s3Client.s3ObjectIdToString(athenaResultLocation);
+            athenaResultSize = s3Client.getDirectorySize(athenaResultDirectoryUrl);
+            log.info("athena result size: " + athenaResultSize);
+        }
+        if (doBigquery) {
+            bigqueryResultDirectoryUrl = gcsClient.blobIdToString(bigqueryResultLocation);
+            bigqueryResultSize = gcsClient.getDirectorySize(bigqueryResultDirectoryUrl);
+            log.info("bigquery result size: " + bigqueryResultSize);
+        }
 
-        if (athenaResultSize < bigqueryResultSize) {
+        boolean resultsInBigQuery = false, resultsInAthena = false;
+        String bigqueryResultsTableFullName = null,
+                athenaResultsTableFullName = null;
+
+        if (!doAll) {
+            //String selectSimpleSql = "select * from %s";
+            if (doBigquery) {
+                resultsInBigQuery = true;
+                bigqueryResultsTableFullName = String.format("`%s.%s.%s`",
+                        bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
+            } else if (doAthena) {
+                resultsInAthena = true;
+                athenaResultsTableFullName = quoteAthenaTableIdentifier(String.format("%s.%s",
+                        athenaDestinationDataset, athenaDestinationTable));
+            } else {
+                throw new IllegalStateException("Invalid state");
+            }
+        } else if (athenaResultSize < bigqueryResultSize) {
             log.info("Performing rest of computation in BigQuery");
             String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
             String gcsAthenaImportDirectory = pathJoin(
@@ -355,7 +609,7 @@ public class Controller {
                     importedAthenaTableName, gcsAthenaImportDirectory);
             log.info("Finished creating table: " + importedAthenaTableName);
 
-            // TODO join the tables together
+            // join the tables together
             String mergeSql = "select\n" +
                     "  a.reference_name, \n" +
                     "  a.start_position,\n" +
@@ -388,10 +642,21 @@ public class Controller {
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     bigqueryDestinationTable, importedAthenaTableName));
-            TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
+            String bigqueryMergedTableName = "merge_" + nonce;
+            bigqueryResultsTableFullName = String.format("%s.%s.%s");
+            TableId bigqueryMergedTableId = TableId.of(bigqueryDestinationDataset, bigqueryMergedTableName);
+            // TODO
+            TableResult tr = bigQueryClient.runSimpleQuery(mergeSql, Optional.of(bigqueryMergedTableId));
+            //TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
             log.info("Finished merge query in BigQuery");
-            log.info("Writing status 200");
+            log.info("Writing response headers");
             response.setStatus(200);
+            response.setHeader("Content-Type", "text/csv");
+            // Notify client of where the result data is stored
+            response.setHeader("X-Swarm-Result-Cloud", "bigquery");
+            String bigqueryDestinationTableQualified = String.format("%s.%s.%s",
+                bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
+            response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
             PrintWriter responseWriter = response.getWriter();
             log.info("Writing data to response stream");
             for (FieldValueList fvl : tr.iterateAll()) {
@@ -407,9 +672,10 @@ public class Controller {
                 ));
             }
             log.info("Finished writing response");
+            log.info("Deleting merged table using table result");
+            bigQueryClient.deleteTableFromTableResult(tr);
         } else {
             log.info("Performing rest of computation in Athena");
-            // TODO
             String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
             String s3BigQueryImportDirectory = pathJoin(
                     athenaClient.getStorageBucket(),
@@ -434,7 +700,7 @@ public class Controller {
             athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory);
             log.info("Finished creating table: " + importedBigqueryTableName);
 
-            // TODO join the tables together
+            // join the tables together
             String mergeSql = "select\n" +
                     "  a.reference_name, \n" +
                     "  a.start_position,\n" +
@@ -470,10 +736,18 @@ public class Controller {
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     athenaDestinationTable, importedBigqueryTableName));
-            com.amazonaws.services.athena.model.ResultSet rs = athenaClient.executeQueryToResultSet(mergeSql);
+            GetQueryResultsResult queryResultsResult = athenaClient.executeQueryToResultSet(mergeSql);
             log.info("Finished merge query in Athena");
-            log.info("Writing status 200");
+            log.info("Writing response headers");
             response.setStatus(200);
+            response.setHeader("Content-Type", "text/csv");
+            // Notify client of where the result data is stored
+            response.setHeader("X-Swarm-Result-Cloud", "athena");
+            String athenaDestinationTableQualified = String.format("%s.%s",
+                    athenaDestinationDataset, athenaDestinationTable);
+            response.setHeader("X-Swarm-Result-Table", athenaDestinationTableQualified);
+            com.amazonaws.services.athena.model.ResultSet rs = queryResultsResult.getResultSet();
+            // iterate tokens
             List<Row> rows = rs.getRows();
             log.info("Writing data to response stream");
 
@@ -491,25 +765,118 @@ public class Controller {
                         data.get(6).getVarCharValue()
                 ));
             }
+
             log.info("Finished writing response");
-            /*while (rs.next()) {
-                response.getWriter().println(String.format(
-                        "%s,%d,%d,%s,%s,%f,%d",
-                        rs.getString("reference_name"),
-                        rs.getLong("start_position"),
-                        rs.getLong("end_position"),
-                        rs.getString("reference_bases"),
-                        rs.getString("alternate_bases"),
-                        rs.getDouble("minor_af"),
-                        rs.getLong("allele_count")
-                ));
-            }*/
         }
+
+
 
         //JsonWriter jsonWriter = new JsonWriter(response.getWriter());
         //jsonWriter.beginObject();
         //jsonWriter.name("message").value("hello world");
         //jsonWriter.endObject();
+    }
+
+    /**
+     * Use Case 4: annotation
+     */
+    @RequestMapping(value = "/annotate", method = {RequestMethod.GET})
+    public void executeStatement(
+            @RequestParam(required = true, name = "sourceCloud") String sourceCloudParam,
+            @RequestParam(required = true, name = "tableName") String tableName,
+            @RequestParam(required = true, name = "destinationTableName") String destinationTableName,
+            //@RequestBody String body,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws InterruptedException, IOException {
+        disallowQuoteSemicolonSpace(tableName);
+        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
+        //FileReader fileReader = new FileReader("sql/annotation.sql");
+        byte[] bytes = Files.readAllBytes(Paths.get(MAIN_ROOT + "sql/annotation.sql"));
+        String sql = new String(bytes, StandardCharsets.US_ASCII);
+
+
+        if (sourceCloudParam.equals("athena")) {
+            // This is just to create a new csv.gz dump of the input table
+            String inputQuery = "select * from " + quoteAthenaTableIdentifier(tableName);
+            S3ObjectId inputTable = athenaClient.executeQueryToObjectId(inputQuery);
+            String tableDataUrl = String.format(
+                    "s3://%s/%s", inputTable.getBucket(), inputTable.getKey());
+            log.info("Executed query and got results object location: " + tableDataUrl);
+
+            // move the results to bigquery
+            S3DirectoryGzipConcatInputStream s3Stream =
+                    new S3DirectoryGzipConcatInputStream(s3Client, tableDataUrl);
+            String gcsImportDirectory = pathJoin(
+                    bigQueryClient.getStorageBucket(),
+                    "annotation-imports");
+            String nonce = randomAlphaNumStringOfLength(12);
+            gcsImportDirectory = pathJoin(gcsImportDirectory, nonce);
+            String gcsImportFileUrl = pathJoin(gcsImportDirectory, "import.csv");
+            GCSUploadStream gcsUploadStream =
+                    new GCSUploadStream(gcsClient, gcsImportFileUrl);
+            log.info("Transferring contents of " + tableDataUrl + " to " + gcsImportFileUrl);
+            s3Stream.transferTo(gcsUploadStream);
+            log.info("Finished transferring files in " + tableDataUrl + " to " + gcsImportFileUrl);
+
+
+            // create a table from the directory where the Athena results were transferred to
+            String importedAthenaTableName = "athena_import_" + nonce;
+            //String headerLine = gcsClient.getFirstLineOfFile(gcsImportFileUrl);
+            Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
+                    importedAthenaTableName, gcsImportDirectory);
+            log.info("Created table from athena import: " + importedAthenaTableName);
+
+
+            // run the annotation SQL on the imported table
+            //String formattedTableName = quoteAthenaTableIdentifier(tableName);
+            String formattedTableName = "`" + tableName + "`";
+            String query = String.format(sql, formattedTableName);
+            // ensure the destination table has a dataset, default to bigquery default dataset if not provided
+            TableId destinationTableId = null;
+            String[] terms = destinationTableName.split("\\.");
+            if (terms.length == 1) {
+                destinationTableName = String.format("%s.%s.%s",
+                        bigQueryClient.getProjectName(), bigQueryClient.getDatasetName(), terms[0]);
+                //destinationTableId = TableId.of(bigQueryClient.getDatasetName(), destinationTableName);
+            } else if (terms.length == 2) {
+                destinationTableName = String.format("%s.%s.%s",
+                        bigQueryClient.getProjectName(), terms[0], terms[1]);
+                //destinationTableId = TableId.of(terms[0], terms[1]);
+            } else if (terms.length == 3) {
+                destinationTableName = String.format("%s.%s.%s",
+                        terms[0], terms[1], terms[2]);
+                //destinationTableId = TableId.of(terms[0], terms[1], terms[2]);
+            } else {
+                throw new IllegalArgumentException("Unknown format for destination table name: " + destinationTableName);
+            }
+
+            // make this a CTAS query
+            log.info("Creating variant annotation table " + destinationTableName +
+                    " from variant table " + tableName);
+            query = String.format(
+                    "create table `%s` as (%s)",
+                    destinationTableName, query
+            );
+            // TODO
+            //TableResult tableResult = bigQueryClient.runSimpleQueryNoDestination(query);
+            TableResult tableResult = bigQueryClient.runSimpleQueryNoDestination(query);
+            //GetQueryResultsResult getQueryResultsResult = athenaClient.executeQueryToResultSet(query);
+            response.setStatus(200);
+            response.setHeader("X-Swarm-Result-Cloud", "bigquery");
+            response.setHeader("X-Swarm-Result-Table",
+                    String.format("%s.%s.%s",
+                            bigQueryClient.getProjectName(),
+                            bigQueryClient.getDatasetName(),
+                            destinationTableName));
+
+            // log transfer size
+
+        } else if (sourceCloudParam.equals("bigquery")) {
+            //bigQueryClient.runSimpleQuery(body);
+            throw new UnsupportedOperationException("Cannot annotate tables in BigQuery yet");
+        } else {
+            throw new ValidationException("Unrecognized cloud param: " + sourceCloudParam);
+        }
     }
 
 
@@ -522,7 +889,6 @@ public class Controller {
             value = "/variants/by_gene/{gene_label}",
             produces = "application/json",
             method = RequestMethod.GET)
-    //@ResponseBody
     public void variantsByGene(
             @RequestParam(required = false, name = "cloud", defaultValue = "all") String cloudParam,
             @PathVariable("gene_label") String geneLabel,
@@ -642,11 +1008,11 @@ public class Controller {
         };
 
         Future<TableResult> gcpFuture = null;
-        if (cloudParam.equals("gcp") || cloudParam.equals("all")) {
+        if (cloudParam.equals("bigquery") || cloudParam.equals("all")) {
             gcpFuture = (executorService.submit(gcpCallable));
         }
         Future<ResultSet> awsFuture = null;
-        if (cloudParam.equals("aws") || cloudParam.equals("all")) {
+        if (cloudParam.equals("athena") || cloudParam.equals("all")) {
             awsFuture = executorService.submit(awsCallable);
         }
 
@@ -680,7 +1046,7 @@ public class Controller {
         jsonWriter.beginObject();
 
         if (gcpTableResult != null) {
-            jsonWriter.name("gcp");
+            jsonWriter.name("bigquery");
             jsonWriter.beginObject();
             jsonWriter.name("count").value(gcpTableResult.getTotalRows());
             jsonWriter.name("results");
@@ -703,7 +1069,7 @@ public class Controller {
 
         if (awsResultSet != null) {
             log.debug("adding aws results object");
-            jsonWriter.name("aws");
+            jsonWriter.name("athena");
             jsonWriter.beginObject();
             jsonWriter.name("results");
             jsonWriter.beginArray();
@@ -739,206 +1105,6 @@ public class Controller {
         System.out.printf("Writing response took %dms\n", (endTime - startTime));
     }
 
-    @RequestMapping(value = "/variants/allele_count", produces = "application/json", method = RequestMethod.GET)
-    @ResponseBody
-    public String alleleCount(
-            @RequestParam(required = false, name = "cloud", defaultValue = "all") String cloudParam,
-            @RequestParam(required = false, name = "reference_name") String referenceNameParam,
-            @RequestParam(required = false, name = "start_position") String startPositionParam,
-            @RequestParam(required = false, name = "end_position") String endPositionParam,
-            @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
-            @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
-            // set to true to check any in [start, end] range instead of exact matches
-            //@RequestParam(required = false, name = "position_range", defaultValue = "false") String positionRangeParam,
-            HttpServletRequest request, HttpServletResponse response
-    ) throws IOException {
-        CountQuery countQuery = new CountQuery();
-
-        try {
-            if (!StringUtils.isEmpty(cloudParam)) {
-                validateCloudParam(cloudParam);
-            }
-            if (!StringUtils.isEmpty(referenceNameParam)) {
-                validateReferenceName(referenceNameParam);
-                countQuery.setReferenceName(referenceNameParam);
-            }
-            if (!StringUtils.isEmpty(startPositionParam)) {
-                Long startPosition = validateLongString(startPositionParam);
-                countQuery.setStartPosition(startPosition);
-            }
-            if (!StringUtils.isEmpty(endPositionParam)) {
-                Long endPosition = validateLongString(endPositionParam);
-                countQuery.setEndPosition(endPosition);
-            }
-            if (!StringUtils.isEmpty(referenceBasesParam)) {
-                validateBasesString(referenceBasesParam);
-                countQuery.setReferenceBases(referenceBasesParam);
-            }
-            if (!StringUtils.isEmpty(alternateBasesParam)) {
-                validateBasesString(alternateBasesParam);
-                countQuery.setAlternateBases(alternateBasesParam);
-            }
-            /*if (!StringUtils.isEmpty(positionRangeParam)) {
-                Boolean positionRange = validateBooleanParam(positionRangeParam);
-                countQuery.setUsePositionAsRange(positionRange);
-            }*/
-
-        } catch (ValidationException e) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-            return null;
-        }
-
-        // return count json
-        JsonObjectBuilder jsonBuilder = Json.createObjectBuilder();
-
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
-        Callable<Long> gcpCallable = new Callable<Long>() {
-            @Override
-            public Long call() throws Exception {
-                long count = getBigQueryClient().executeCount(countQuery, "thousandgenomes_vcf_half1");
-                jsonBuilder.add("count", count);
-                return count;
-            }
-        };
-        Callable<Long> awsCallable = new Callable<Long>() {
-            @Override
-            public Long call() throws Exception {
-                //long count = getBigQueryClient().executeCount(countQuery, "thousandgenomes_vcf_half1");
-                //jsonBuilder.add("count", count);
-                //return count;
-                throw new UnsupportedOperationException("AWS Client is not fully implemented");
-            }
-        };
-
-        List<Future<Long>> futures = new ArrayList<>();
-        if (cloudParam.equals("gcp") || cloudParam.equals("all")) {
-            futures.add(executorService.submit(gcpCallable));
-        }
-        if (cloudParam.equals("aws") || cloudParam.equals("all")) {
-            futures.add(executorService.submit(awsCallable));
-        }
-
-
-        executorService.shutdown();
-        try {
-            executorService.awaitTermination(60, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Query was interrupted unexpectedly");
-            return null;
-        }
-
-        for (Future<Long> future : futures) {
-            try {
-                future.get();
-            } catch (ExecutionException | InterruptedException e) {
-                response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-            }
-        }
-
-        return jsonBuilder.build().toString();
-    }
-
-
-    @RequestMapping(value = "/count", produces = "application/json", method = RequestMethod.GET)
-    @ResponseBody
-    public String count(
-            @RequestParam(required = false, name = "cloud", defaultValue = "all") String cloudParam,
-            @RequestParam(required = false, name = "reference_name") String referenceNameParam,
-            @RequestParam(required = false, name = "start_position") String startPositionParam,
-            @RequestParam(required = false, name = "end_position") String endPositionParam,
-            @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
-            @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
-            // set to true to check any in [start, end] range instead of exact matches
-            @RequestParam(required = false, name = "position_range", defaultValue = "false") String positionRangeParam,
-            HttpServletRequest request, HttpServletResponse response
-    ) throws IOException {
-        CountQuery countQuery = new CountQuery();
-
-        try {
-            if (!StringUtils.isEmpty(cloudParam)) {
-                validateCloudParam(cloudParam);
-            }
-            if (!StringUtils.isEmpty(referenceNameParam)) {
-                validateReferenceName(referenceNameParam);
-                countQuery.setReferenceName(referenceNameParam);
-            }
-            if (!StringUtils.isEmpty(startPositionParam)) {
-                Long startPosition = validateLongString(startPositionParam);
-                countQuery.setStartPosition(startPosition);
-            }
-            if (!StringUtils.isEmpty(endPositionParam)) {
-                Long endPosition = validateLongString(endPositionParam);
-                countQuery.setEndPosition(endPosition);
-            }
-            if (!StringUtils.isEmpty(referenceBasesParam)) {
-                validateBasesString(referenceBasesParam);
-                countQuery.setReferenceBases(referenceBasesParam);
-            }
-            if (!StringUtils.isEmpty(alternateBasesParam)) {
-                validateBasesString(alternateBasesParam);
-                countQuery.setAlternateBases(alternateBasesParam);
-            }
-            if (!StringUtils.isEmpty(positionRangeParam)) {
-                Boolean positionRange = validateBooleanParam(positionRangeParam);
-                countQuery.setUsePositionAsRange(positionRange);
-            }
-
-        } catch (ValidationException e) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-            return null;
-        }
-
-        // return count json
-        JsonObjectBuilder jsonBuilder = Json.createObjectBuilder();
-
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
-        Callable<Long> gcpCallable = new Callable<Long>() {
-            @Override
-            public Long call() throws Exception {
-                long count = getBigQueryClient().executeCount(countQuery, "thousandgenomes_vcf_half1");
-                jsonBuilder.add("count", count);
-                return count;
-            }
-        };
-        Callable<Long> awsCallable = new Callable<Long>() {
-            @Override
-            public Long call() throws Exception {
-                //long count = getBigQueryClient().executeCount(countQuery, "thousandgenomes_vcf_half1");
-                //jsonBuilder.add("count", count);
-                //return count;
-                throw new UnsupportedOperationException("AWS Client is not fully implemented");
-            }
-        };
-
-        List<Future<Long>> futures = new ArrayList<>();
-        if (cloudParam.equals("gcp") || cloudParam.equals("all")) {
-            futures.add(executorService.submit(gcpCallable));
-        }
-        if (cloudParam.equals("aws") || cloudParam.equals("all")) {
-            futures.add(executorService.submit(awsCallable));
-        }
-
-
-        executorService.shutdown();
-        try {
-            executorService.awaitTermination(60, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Query was interrupted unexpectedly");
-            return null;
-        }
-
-        for (Future<Long> future : futures) {
-            try {
-                future.get();
-            } catch (ExecutionException | InterruptedException e) {
-                response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-            }
-        }
-
-        return jsonBuilder.build().toString();
-    }
-
-
     private Boolean validateBooleanParam(String param) {
         if (param.equalsIgnoreCase("true")) {
             return true;
@@ -954,8 +1120,8 @@ public class Controller {
             return;
         }
         ArrayList<String> allowedClouds = new ArrayList<String>();
-        allowedClouds.add("aws");
-        allowedClouds.add("gcp");
+        allowedClouds.add("athena");
+        allowedClouds.add("bigquery");
         allowedClouds.add("all");
 
         if (!allowedClouds.contains(cloud)) {

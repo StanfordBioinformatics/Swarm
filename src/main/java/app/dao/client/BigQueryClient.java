@@ -16,6 +16,9 @@ import javax.annotation.Nullable;
 import javax.validation.constraints.NotNull;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 
 import static app.dao.client.StringUtils.*;
@@ -55,6 +58,14 @@ public class BigQueryClient implements DatabaseClientInterface {
                     "No dataset with name [%s] exists in project [%s]",
                     datasetName, projectName));
         }
+    }
+
+    public String getProjectName() {
+        return this.projectName;
+    }
+
+    public String getDatasetName() {
+        return this.datasetName;
     }
 
     /**
@@ -108,7 +119,6 @@ public class BigQueryClient implements DatabaseClientInterface {
                 deleteResultTable);
     }
 
-
     /**
      * This method does the following:
      * <br>
@@ -144,7 +154,7 @@ public class BigQueryClient implements DatabaseClientInterface {
         TableId destinationTableId = TableId.of(destinationDatasetStr, destinationTableStr);
         QueryJobConfiguration queryJobConfiguration = this.variantQueryToQueryJobConfiguration(
                 variantQuery,
-                destinationTableId);
+                Optional.of(destinationTableId));
 
         JobInfo jobInfo = JobInfo.of(queryJobConfiguration);
         Job job = bigquery.create(jobInfo);
@@ -343,13 +353,49 @@ public class BigQueryClient implements DatabaseClientInterface {
         return bigquery.query(queryJobConfig);
     }
 
+    // cache temp table names
+    private Map<TableResult,String> tableResultTableMap = new HashMap<>();
+
+    public TableResult runSimpleQueryNoDestination(String sql) throws InterruptedException {
+        return runSimpleQuery(sql, Optional.empty());
+    }
+
     public TableResult runSimpleQuery(String sql) throws InterruptedException {
+        String tempTableName = "temp_table_" + randomAlphaNumStringOfLength(32);
+        TableId destination = TableId.of(this.datasetName, tempTableName);
+        return runSimpleQuery(sql, Optional.of(destination));
+    }
+
+    public TableResult runSimpleQuery(String sql, @NotNull Optional<TableId> destination) throws InterruptedException {
         log.debug("Running simple query:\n" + sql);
-        QueryJobConfiguration queryConfig =
-                QueryJobConfiguration.newBuilder(sql)
-                        //.setAllowLargeResults(true) // requires setting a destination table
-                        .build();
-        return runQueryJob(queryConfig);
+        QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder(sql);
+
+        TableId destId = null;
+        if (destination.isPresent()) {
+            destId = destination.get();
+            builder.setDestinationTable(destId);
+            builder.setAllowLargeResults(true); // requires setting a destination table
+        }
+        QueryJobConfiguration queryConfig = builder.build();
+        TableResult tr = runQueryJob(queryConfig);
+        if (destination.isPresent()) {
+            destId = destination.get();
+            String tableName = String.format(
+                    "%s.%s.%s", destId.getProject(), destId.getDataset(), destId.getTable()
+            );
+            tableResultTableMap.put(tr, tableName);
+        }
+        return tr;
+    }
+
+    public void deleteTableFromTableResult(TableResult tr) {
+        String tableName = tableResultTableMap.get(tr);
+        if (tableName != null) {
+            log.debug("Deleting table " + tableName + " from table result");
+            deleteTable(tableName);
+        } else {
+            log.warn("No table name found from table result");
+        }
     }
 
     public void deleteTable(String tableName) {
@@ -361,6 +407,50 @@ public class BigQueryClient implements DatabaseClientInterface {
         if (!deleted) {
             throw new RuntimeException("Failed to delete table: " + datasetName + "." + tableName);
         }
+    }
+
+
+
+    public Table createAnnotationTableFromGcs(String tableName, String gcsDirectoryUrl) throws IOException {
+        String headersPath = "sql/annotation_headers.csv";
+        byte[] bytes = Files.readAllBytes(Paths.get("sql/annotation_headers.sql"));
+        String headersString = new String(bytes, StandardCharsets.US_ASCII);
+        String[] headers = headersString.split(",");
+        assert(headers.length == 186); // this should be removed or changed to the expected count
+        ArrayList<Field> fields = new ArrayList<>();
+        for (String header : headers) {
+            fields.add(Field.newBuilder(header, StandardSQLTypeName.STRING).build());
+        }
+        Schema schema = Schema.of(fields);
+        FormatOptions formatOptions = FormatOptions.csv();
+        ExternalTableDefinition tableDefinition =
+                ExternalTableDefinition.newBuilder(gcsDirectoryUrl, schema, formatOptions)
+                .build();
+        TableId tableId = TableId.of(this.datasetName, tableName);
+        log.info("Creating table " + tableName + " from gcs directory: " + gcsDirectoryUrl);
+        Table newTable = bigquery.create(TableInfo.newBuilder(tableId, tableDefinition).build());
+        log.info("Finished creating table " + tableName);
+        return newTable;
+    }
+
+    public Table createStringTableFromGcs(
+            String tableName,
+            String gcsDirectoryUrl,
+            List<String> columnNames) {
+        ArrayList<Field> fields = new ArrayList<>();
+        for (String header : columnNames) {
+            fields.add(Field.newBuilder(header, StandardSQLTypeName.STRING).build());
+        }
+        Schema schema = Schema.of(fields);
+        FormatOptions formatOptions = FormatOptions.csv();
+        ExternalTableDefinition tableDefinition =
+                ExternalTableDefinition.newBuilder(gcsDirectoryUrl, schema, formatOptions)
+                        .build();
+        TableId tableId = TableId.of(this.datasetName, tableName);
+        log.info("Creating table " + tableName + " from gcs directory: " + gcsDirectoryUrl);
+        Table newTable = bigquery.create(TableInfo.newBuilder(tableId, tableDefinition).build());
+        log.info("Finished creating table " + tableName);
+        return newTable;
     }
 
     public Table createVariantTableFromGcs(String tableName, String gcsDirectoryUrl) {
@@ -389,12 +479,32 @@ public class BigQueryClient implements DatabaseClientInterface {
         return newTable;
     }
 
+    public long executeCount(VariantQuery variantQuery) throws InterruptedException {
+        if (!variantQuery.getCountOnly()) {
+            throw new IllegalArgumentException("VariantQuery did not have countOnly set");
+        }
+        String tablename = "count_query_" + randomAlphaNumStringOfLength(8);
+        TableId tableId = TableId.of(this.datasetName, tablename);
+        QueryJobConfiguration jobConfiguration =
+                this.variantQueryToQueryJobConfiguration(
+                        variantQuery,
+                        Optional.of(tableId));
+        TableResult tr = this.runQueryJob(jobConfiguration);
+        return Long.parseLong(
+                tr.iterateAll()
+                        .iterator()
+                        .next()
+                        .get("ct")
+                        .getStringValue());
+    }
 
     public QueryJobConfiguration variantQueryToQueryJobConfiguration(
             @NotNull VariantQuery variantQuery,
-            @NotNull TableId destinationTableId) {
+            @NotNull Optional<TableId> destinationTableId) {
         StringBuilder sb = new StringBuilder(String.format(
-                "select * from `%s`", this.datasetName + "." + variantQuery.getTableIdentifier()
+                "select %s from `%s`",
+                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
+                this.datasetName + "." + variantQuery.getTableIdentifier()
         ));
 
         QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder("");
@@ -463,8 +573,10 @@ public class BigQueryClient implements DatabaseClientInterface {
         String queryString = sb.toString();
         log.debug("Query: " + queryString);
         builder.setQuery(queryString);
-        builder.setDestinationTable(destinationTableId);
-
+        if (destinationTableId.isPresent()) {
+            builder.setDestinationTable(destinationTableId.get());
+        }
+        builder.setAllowLargeResults(true);
         QueryJobConfiguration queryJobConfiguration = builder.build();
         log.info("Constructed new query job configuration from variant query");
         return queryJobConfiguration;

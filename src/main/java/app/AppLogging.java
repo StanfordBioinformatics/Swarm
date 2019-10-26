@@ -25,4 +25,5 @@ public class AppLogging {
         Configurator.setLevel(l.getName(), appLogLevel);
         return l;
     }
+
 }

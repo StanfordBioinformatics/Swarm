@@ -153,6 +153,18 @@ public class S3Client {
         return bufferedContentStream;
     }
 
+    public String getFirstLineOfFile(String objectUrl) throws IOException {
+        try (InputStream is = this.getInputStream(objectUrl);
+             Scanner scany = new Scanner(is);)
+        {
+            if (!scany.hasNextLine()) {
+                throw new IOException("Failed to read line from GCS object: " + objectUrl);
+            }
+            String s = scany.nextLine();
+            return s;
+        }
+    }
+
     public AmazonS3 getS3() {
         return this.s3;
     }
