@@ -90,6 +90,7 @@ public class AthenaClient {
 
         AWSCredentialsProvider credProvider = new PropertiesFileCredentialsProvider(credentialPath);
         AmazonAthenaClientBuilder athenaClientBuilder = AmazonAthenaClientBuilder.standard().withCredentials(credProvider);
+        athenaClientBuilder.setRegion(this.region.getName());
         this.athena = athenaClientBuilder.build();
 
         this.databaseName = databaseName;
