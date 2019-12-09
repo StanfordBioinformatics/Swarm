@@ -2,7 +2,6 @@ package app.api;
 
 import app.AppLogging;
 import app.dao.client.*;
-import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
@@ -18,12 +17,13 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Nullable;
-import javax.json.*;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpServletResponseWrapper;
 import javax.validation.ValidationException;
-import java.io.FileNotFoundException;
+import javax.validation.constraints.NotNull;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
@@ -31,10 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -97,6 +94,28 @@ public class Controller {
         public Long endPosition;
     }
 
+    public class TableDatabasePair {
+        private String tableName;
+        private String databaseName;
+
+        public TableDatabasePair(String tableName, String databaseName) {
+            this.tableName = tableName;
+            this.databaseName = databaseName;
+        }
+
+        public String getTableName() {return this.tableName;}
+
+        public String getDatabaseName() {return this.databaseName;}
+    }
+
+    public String loadSqlFile(String basename) throws IOException {
+        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
+        String path = MAIN_ROOT + "sql/" + basename;
+        byte[] bytes = Files.readAllBytes(Paths.get(path));
+        log.info("Loading sql file: " + path);
+        String sql = new String(bytes, StandardCharsets.US_ASCII);
+        return sql;
+    }
 
     @RequestMapping(value = "/stat_by_gene/{gene_label}", method = {RequestMethod.GET})
     public void getStatByGene(
@@ -308,7 +327,7 @@ public class Controller {
     )
     public void getVariantsByGene(
             @PathVariable("gene_label") String geneLabel,
-            @PathVariable("sourceCloud") String sourceCloud,
+            @RequestParam(required = false, defaultValue = "all", name = "sourceCloud") String sourceCloud,
             HttpServletRequest request, HttpServletResponse response
     ) throws IOException, SQLException, InterruptedException, TimeoutException, ExecutionException {
 
@@ -326,8 +345,64 @@ public class Controller {
                 null,
                 null,
                 "true",
+                "true",
                 request,
                 response);
+    }
+
+    /**
+     * Returns a map with two entries, half1 and half2. These are in turn a map of
+     * SuperPopulation label to a list of sample labels.
+     *
+     * @param superPopulation - optional SuperPopulation value (ex: EUR, AFR, SAS, EAS)
+     * @return superPopulation to sample map in each half table
+     * @throws IOException an IO operation failed
+     * @throws InterruptedException a call was interrupted
+     */
+    private Map<String,Map<String,List<String>>> getSuperPopulationSamples(@NotNull Optional<String> superPopulation) throws IOException, InterruptedException {
+        String sql = loadSqlFile("superpopulation-samples.sql");
+        if (superPopulation.isPresent()) {
+            // TODO create parameterized method in bigquery client
+            sql += "\nwhere SuperPopulation = '" + superPopulation.get() + "'";
+        }
+        Map<String,List<String>> resultsHalf1 = new HashMap<>();
+        Map<String,List<String>> resultsHalf2 = new HashMap<>();
+        TableResult tr = bigQueryClient.runSimpleQuery(sql);
+        Iterable<FieldValueList> fvlIterator = tr.iterateAll();
+        for (FieldValueList fvl : fvlIterator) {
+            String sp = fvl.get("SuperPopulation").getStringValue();
+            String half1 = fvl.get("Half1").getStringValue();
+            String half2 = fvl.get("Half2").getStringValue();
+
+            List<String> sampleArray1 = null;
+            List<String> sampleArray2 = null;
+
+            // Get or create results array
+            if (!resultsHalf1.containsKey(sp)) {
+                sampleArray1 = new ArrayList<>();
+                resultsHalf1.put(sp, sampleArray1);
+            } else {
+                sampleArray1 = resultsHalf1.get(sp);
+            }
+            if (!resultsHalf2.containsKey(sp)) {
+                sampleArray2 = new ArrayList<>();
+                resultsHalf2.put(sp, sampleArray2);
+            } else {
+                sampleArray2 = resultsHalf2.get(sp);
+            }
+
+            // Store the results
+            for (String sample : half1.split(",")) {
+                sampleArray1.add(sample);
+            }
+            for (String sample : half2.split(",")) {
+                sampleArray2.add(sample);
+            }
+        }
+        Map<String,Map<String,List<String>>> retMap = new HashMap<>();
+        retMap.put("half1", resultsHalf1);
+        retMap.put("half2", resultsHalf2);
+        return retMap;
     }
 
     private GeneCoordinate getGeneCoordinates(String geneLabel) throws InterruptedException, ExecutionException, TimeoutException {
@@ -385,25 +460,202 @@ public class Controller {
         return geneCoordinate;
     }
 
+
+
+    @RequestMapping(value = "/count/by_gene/{gene_label}/by_superpopulation", method = {RequestMethod.GET})
+    public void getSuperPopulationCounts(
+            @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
+            //@RequestParam(required = false, name = "reference_name") String referenceNameParam,
+            //@RequestParam(required = false, name = "start_position") String startPositionParam,
+            //@RequestParam(required = false, name = "end_position") String endPositionParam,
+            //@RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
+            //@RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            //@RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
+            @RequestParam(required = false, name = "superpopulation", defaultValue = "") String superPopulationParam,
+            @PathVariable("gene_label") String geneLabel,
+            HttpServletRequest request, HttpServletResponse response
+    ) throws InterruptedException, SQLException, IOException {
+        // TODO validation
+        List<String> superPopulationFilter = null;
+        boolean doSuperPopulationFilter = true;
+        if (superPopulationParam.isEmpty()) {
+            doSuperPopulationFilter = false;
+        } else {
+            superPopulationFilter = Arrays.asList(superPopulationParam.split(","));
+        }
+//        TableDatabasePair tdp = this.getVariants(
+//                sourceCloud,
+//                referenceNameParam,
+//                startPositionParam,
+//                endPositionParam,
+//                referenceBasesParam,
+//                alternateBasesParam,
+//                positionRange,
+//                "false",
+//                request, response);
+
+//        String selectTemplate =
+//                "(select\n" +
+//                "  reference_name, pos, id, ref, alt,\n" +
+//                "  (HG01488_alleleCount + HG00632_alleleCount) as AFR_alleleCount\n" +
+//                "from\n" +
+//                "  (select reference_name, pos, id, ref, alt,\n" +
+//                "{{case_statements}}" +
+//                "    from `gbsc-gcp-project-annohive-dev.1000.1000Orig_half1`) as count_conversion\n" +
+//                ")";
+
+        String caseTemplate =
+                //"{{sample_name}},\n" +
+                "  (case {{sample_name}}\n" +
+                "    when '0' then 0 when '1' then 1 when '2' then 1 when '3' then 1\n" +
+                "    when '0|0' then 0 when '0|1' then 1 when '0|2' then 1 when '0|3' then 1\n" +
+                "    when '1|0' then 1 when '1|1' then 2 when '1|2' then 2 when '1|3' then 2\n" +
+                "    when '2|0' then 1 when '2|1' then 2 when '2|2' then 2 when '2|3' then 2\n" +
+                "    when '3|0' then 1 when '3|1' then 2 when '3|2' then 2 when '3|3' then 2\n" +
+                "    else 0 end\n" +
+                "  ) as {{sample_name}}_alleleCount";
+
+        Map<String, Map<String, List<String>>> superPopulationMap = getSuperPopulationSamples(Optional.empty());
+        ArrayList<String> superPopulationLabels = new ArrayList<>();
+        StringBuilder caseStatements = new StringBuilder();
+
+        StringBuilder sumFields = new StringBuilder();
+
+        if (!superPopulationMap.containsKey("half1")) {
+            throw new IllegalArgumentException("SuperPopulation table must contain half1");
+        }
+        if (!superPopulationMap.containsKey("half2")) {
+            throw new IllegalArgumentException("SuperPopulation table must contain half2");
+        }
+        Map<String,List<String>> half1Map = superPopulationMap.get("half1");
+        Map<String,List<String>> half2Map = superPopulationMap.get("half2");
+
+        long spCount = 0;
+        long caseCount = 0;
+        for (Map.Entry<String,List<String>> entry : half1Map.entrySet()) {
+            String superPopulation = entry.getKey();
+            List<String> sampleList = entry.getValue();
+
+            if (doSuperPopulationFilter && !superPopulationFilter.contains(superPopulation)) {
+                log.debug("Skipping super population " + superPopulation + ", not in filter");
+                continue;
+            }
+
+            if (spCount > 0) {
+                sumFields.append(",\n");
+            }
+            sumFields.append("(");
+            for (int i = 0; i < sampleList.size(); i++) {
+                String sampleName = sampleList.get(i);
+                if (StringUtils.containsWhitespace(sampleName)) {
+                    log.error("Sample label " + sampleName + " cannot contain whitespace");
+                    throw new IllegalArgumentException("Sample label cannot contain whitespace");
+                }
+
+                // Add case statement for this sample
+                if (caseCount > 0) {
+                    caseStatements.append(",\n");
+                }
+                caseStatements.append(caseTemplate.replaceAll("\\{\\{sample_name}}", sampleName));
+                caseCount++;
+                // Add to the sum statement
+                if (i > 0) {
+                    sumFields.append(" + ");
+                }
+                //String sampleACField = sampleName + "_alleleCount";
+                sumFields.append(sampleName + "_alleleCount");
+            }
+            sumFields.append(") as ").append(superPopulation).append("_alleleCount");
+            spCount++;
+        }
+        for (Map.Entry<String,List<String>> entry : half2Map.entrySet()) {
+            String superPopulation = entry.getKey();
+            List<String> sampleList = entry.getValue();
+
+            if (doSuperPopulationFilter && !superPopulationFilter.contains(superPopulation)) {
+                log.debug("Skipping super population " + superPopulation + ", not in filter");
+                continue;
+            }
+
+            if (spCount > 0) {
+                sumFields.append(",\n");
+            }
+            sumFields.append("(");
+            for (int i = 0; i < sampleList.size(); i++) {
+                String sampleName = sampleList.get(i);
+                if (StringUtils.containsWhitespace(sampleName)) {
+                    log.error("Sample label " + sampleName + " cannot contain whitespace");
+                    throw new IllegalArgumentException("Sample label cannot contain whitespace");
+                }
+
+                // Add case statement for this sample
+                if (caseCount > 0) {
+                    caseStatements.append(",\n");
+                }
+                caseStatements.append(caseTemplate.replaceAll("\\{\\{sample_name}}", sampleName));
+                caseCount++;
+                // Add to the sum statement
+                if (i > 0) {
+                    sumFields.append(" + ");
+                }
+                //String sampleACField = sampleName + "_alleleCount";
+                sumFields.append(sampleName + "_alleleCount");
+            }
+            sumFields.append(") as ").append(superPopulation).append("_alleleCount");
+            spCount++;
+        }
+
+        String half1Tablename = "`gbsc-gcp-project-annohive-dev.1000.1000Orig_half1`";
+
+        String sql = "select reference_name, pos, id, ref, alt,\n "; // not including INFO field
+
+        boolean snpOnly = true;
+
+        String sumSelect =
+                sumFields.toString() + " \n " +
+                "from \n"+
+                "(select reference_name, pos, id, ref, alt, \n" +
+                "    " + caseStatements.toString() +
+                "\nfrom " + half1Tablename;
+
+        if (snpOnly) {
+            sumSelect += "\nwhere length(ref) = 1 and length(alt) = 1";
+        }
+        sumSelect += ")";
+
+        sql += sumSelect;
+        //        .replaceAll("\\{\\{sum_fields}}", sumFields.toString())
+        //        .replaceAll("\\{\\{count_conversion}}", caseStatements.toString());
+
+        //log.info("Sample Super Population Query:\n" + sql);
+        FileWriter queryFileWriter = new FileWriter(new File("query.txt"));
+        queryFileWriter.write(sql);
+        queryFileWriter.flush();
+
+        // TODO
+
+    }
+
+
     /**
      * Use Case 3: computing allele frequency across data sets
-     * @param referenceNameParam
-     * @param startPositionParam
-     * @param endPositionParam
-     * @param referenceBasesParam
-     * @param alternateBasesParam
-     * @param positionRange
-     * @param request
-     * @param response
-     * @throws IOException
-     * @throws SQLException
-     * @throws InterruptedException
+     * @param referenceNameParam reference name
+     * @param startPositionParam start position
+     * @param endPositionParam end position
+     * @param referenceBasesParam reference bases
+     * @param alternateBasesParam alternate bases
+     * @param positionRange use the positions as a range, not an exact match
+     * @param request HttpRequest object
+     * @param response HttpResponse object
+     * @throws IOException an IO operation failed
+     * @throws SQLException a sql execution was invalid
+     * @throws InterruptedException a call was interrupted
      */
     @RequestMapping(
             value = "/variants",
             method = {RequestMethod.GET}
     )
-    public void getVariants(
+    private TableDatabasePair getVariants(
             @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
             @RequestParam(required = false, name = "start_position") String startPositionParam,
@@ -411,9 +663,11 @@ public class Controller {
             @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
             @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
             @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
+            @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
     ) throws IOException, SQLException, InterruptedException {
         VariantQuery variantQuery = new VariantQuery();
+        boolean returnResults = false;
         try {
             if (!StringUtils.isEmpty(positionRange)) {
                 if (positionRange.equalsIgnoreCase("true")) {
@@ -448,9 +702,16 @@ public class Controller {
                 validateBasesString(alternateBasesParam);
                 variantQuery.setAlternateBases(alternateBasesParam);
             }
+            if (!StringUtils.isEmpty(returnResultsParam)) {
+                if (returnResultsParam.equals("true")) {
+                    returnResults = true;
+                } else if (!returnResultsParam.equals("false")) {
+                    throw new ValidationException("Invalid param for return_results, must be true or false");
+                }
+            }
         } catch (ValidationException e) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-            return;
+            return null;
         }
 
         variantQuery.setTableIdentifier("variants");
@@ -526,7 +787,7 @@ public class Controller {
             response.sendError(
                     HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "Query executor was interrupted unexpectedly");
-            return;
+            return null;
         }
 
         log.debug("Getting query result locations");
@@ -545,7 +806,7 @@ public class Controller {
             response.sendError(
                     HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "Failed to retrieve query result location");
-            return;
+            return null;
         }
 
         String athenaResultDirectoryUrl = null, bigqueryResultDirectoryUrl = null;
@@ -566,7 +827,7 @@ public class Controller {
         String bigqueryResultsTableFullName = null,
                 athenaResultsTableFullName = null;
 
-        if (!doAll) {
+        /*if (!doAll) {
             //String selectSimpleSql = "select * from %s";
             if (doBigquery) {
                 resultsInBigQuery = true;
@@ -579,7 +840,7 @@ public class Controller {
             } else {
                 throw new IllegalStateException("Invalid state");
             }
-        } else if (athenaResultSize < bigqueryResultSize) {
+        } else*/ if (athenaResultSize < bigqueryResultSize) {
             log.info("Performing rest of computation in BigQuery");
             String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
             String gcsAthenaImportDirectory = pathJoin(
@@ -659,6 +920,7 @@ public class Controller {
             response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
             PrintWriter responseWriter = response.getWriter();
             log.info("Writing data to response stream");
+
             for (FieldValueList fvl : tr.iterateAll()) {
                 responseWriter.println(String.format(
                         "%s,%d,%d,%s,%s,%f,%d",
@@ -674,6 +936,8 @@ public class Controller {
             log.info("Finished writing response");
             log.info("Deleting merged table using table result");
             bigQueryClient.deleteTableFromTableResult(tr);
+
+            return new TableDatabasePair("bigquery", bigqueryDestinationTableQualified);
         } else {
             log.info("Performing rest of computation in Athena");
             String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
@@ -767,14 +1031,9 @@ public class Controller {
             }
 
             log.info("Finished writing response");
+
+            return new TableDatabasePair("athena", athenaDestinationTableQualified);
         }
-
-
-
-        //JsonWriter jsonWriter = new JsonWriter(response.getWriter());
-        //jsonWriter.beginObject();
-        //jsonWriter.name("message").value("hello world");
-        //jsonWriter.endObject();
     }
 
     /**
@@ -789,10 +1048,10 @@ public class Controller {
             HttpServletRequest request, HttpServletResponse response
     ) throws InterruptedException, IOException {
         disallowQuoteSemicolonSpace(tableName);
-        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
-        //FileReader fileReader = new FileReader("sql/annotation.sql");
-        byte[] bytes = Files.readAllBytes(Paths.get(MAIN_ROOT + "sql/annotation.sql"));
-        String sql = new String(bytes, StandardCharsets.US_ASCII);
+//        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
+//        byte[] bytes = Files.readAllBytes(Paths.get(MAIN_ROOT + "sql/annotation.sql"));
+//        String sql = new String(bytes, StandardCharsets.US_ASCII);
+        String sql = loadSqlFile("annotation.sql");
 
 
         if (sourceCloudParam.equals("athena")) {
