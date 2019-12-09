@@ -57,7 +57,9 @@ public class Controller {
      */
     private GCSClient gcsClient;
     private S3Client s3Client;
-    private Region awsRegion = Region.getRegion(Regions.US_EAST_2);
+    //private Region awsRegion = Region.getRegion(Regions.US_EAST_2);
+    private Region awsRegion = Region.getRegion(Regions.US_WEST_1);
+
 
     public Controller() {
         getBigQueryClient();

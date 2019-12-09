@@ -5,6 +5,8 @@ import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.PropertiesFileCredentialsProvider;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.athena.AmazonAthenaClientBuilder;
 import com.amazonaws.services.athena.model.*;
@@ -30,6 +32,7 @@ public class AthenaClient {
     private AmazonAthena athena;
     private String databaseName;
     private Properties configuration;
+    private Region region = Region.getRegion(Regions.US_WEST_1);
 
     // prop names
     private final String PROP_NAME_KEY_ID = "accessKey";
@@ -98,7 +101,8 @@ public class AthenaClient {
         connectionInfo.setProperty("Password", this.configuration.getProperty(PROP_NAME_SECRET_KEY));
         //connectionInfo.setProperty("S3OutputLocation", this.outputLocation);
         // DO NOT LOG jdbcUrl
-        String jdbcUrl = "jdbc:awsathena://AwsRegion=us-east-2;";
+        //String jdbcUrl = "jdbc:awsathena://AwsRegion=us-east-2;";
+        String jdbcUrl = "jdbc:awsathena://AwsRegion=" + region.getName() + ";";
         jdbcUrl += String.format("S3OutputLocation=%s;", this.configuration.getProperty(PROP_NAME_OUTPUT_LOCATION));
         return new Driver().connect(jdbcUrl, connectionInfo);
         //return DriverManager.getConnection(jdbcUrl, connectionInfo);
