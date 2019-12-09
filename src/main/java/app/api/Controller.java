@@ -657,7 +657,7 @@ public class Controller {
             value = "/variants",
             method = {RequestMethod.GET}
     )
-    private TableDatabasePair getVariants(
+    private void getVariants(
             @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
             @RequestParam(required = false, name = "start_position") String startPositionParam,
@@ -713,7 +713,8 @@ public class Controller {
             }
         } catch (ValidationException e) {
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-            return null;
+            //return null;
+            return;
         }
 
         variantQuery.setTableIdentifier("variants");
@@ -789,7 +790,7 @@ public class Controller {
             response.sendError(
                     HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "Query executor was interrupted unexpectedly");
-            return null;
+            return;
         }
 
         log.debug("Getting query result locations");
@@ -808,7 +809,7 @@ public class Controller {
             response.sendError(
                     HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "Failed to retrieve query result location");
-            return null;
+            return;
         }
 
         String athenaResultDirectoryUrl = null, bigqueryResultDirectoryUrl = null;
@@ -939,7 +940,8 @@ public class Controller {
             log.info("Deleting merged table using table result");
             bigQueryClient.deleteTableFromTableResult(tr);
 
-            return new TableDatabasePair("bigquery", bigqueryDestinationTableQualified);
+            //return new TableDatabasePair("bigquery", bigqueryDestinationTableQualified);
+            return;
         } else {
             log.info("Performing rest of computation in Athena");
             String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
@@ -1033,8 +1035,8 @@ public class Controller {
             }
 
             log.info("Finished writing response");
-
-            return new TableDatabasePair("athena", athenaDestinationTableQualified);
+            //return new TableDatabasePair("athena", athenaDestinationTableQualified);
+            return;
         }
     }
 
