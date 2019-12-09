@@ -185,7 +185,6 @@ public class BigQueryClient implements DatabaseClientInterface {
 
         // export to GCS
         Table destTable = bigquery.getTable(destinationTableId);
-        String format = "CSV";
         S3PathParser parser = new S3PathParser("gs://", getOutputLocation());
         String exportDirectory = pathJoin(parser.objectPath, outputId);
         String exportPathFormat = pathJoin(exportDirectory, job.getJobId().getJob() + "-*.csv.gz");
@@ -273,6 +272,8 @@ public class BigQueryClient implements DatabaseClientInterface {
         FieldValueList fvl = tr.iterateAll().iterator().next();
         return fvl.get("ct").getLongValue();
     }
+
+
 
     @Override
     public long executeCount(String tableName, String fieldName, Object fieldValue) {
