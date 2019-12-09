@@ -24,7 +24,7 @@ public class AppExceptionHandler {
         e.printStackTrace(pw);
 
         e.printStackTrace();
-        String stacktrace = os.toString(StandardCharsets.UTF_8);
+        String stacktrace = os.toString(StandardCharsets.UTF_8.name());
         return new ResponseEntity<>(stacktrace, HttpStatus.INTERNAL_SERVER_ERROR);
     }
 }
