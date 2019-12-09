@@ -32,6 +32,9 @@ public class StringUtils {
     }
 
     public static String ensureNoTrailingSlash(String s) {
+        if (s == null) {
+            return s;
+        }
         if (s.endsWith("/")) {
             return s.substring(0, s.length() - 2);
         }
