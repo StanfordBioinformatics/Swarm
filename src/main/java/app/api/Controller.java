@@ -3,6 +3,7 @@ package app.api;
 import app.AppLogging;
 import app.dao.client.*;
 import app.dao.query.VariantQuery;
+import app.dao.client.StringUtils;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.athena.model.*;
@@ -12,24 +13,18 @@ import com.google.cloud.storage.BlobId;
 import com.google.gson.stream.JsonWriter;
 import org.apache.logging.log4j.Logger;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
-import org.springframework.http.MediaType;
-import org.springframework.util.StringUtils;
+//import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Nullable;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import javax.servlet.http.HttpServletResponseWrapper;
 import javax.validation.ValidationException;
 import javax.validation.constraints.NotNull;
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.*;
@@ -330,8 +325,17 @@ public class Controller {
     public void getVariantsByGene(
             @PathVariable("gene_label") String geneLabel,
             @RequestParam(required = false, defaultValue = "all", name = "sourceCloud") String sourceCloud,
+            @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
     ) throws IOException, SQLException, InterruptedException, TimeoutException, ExecutionException {
+        boolean returnResults = false;
+        if (!StringUtils.isEmpty(returnResultsParam)) {
+            if (returnResultsParam.equals("true")) {
+                returnResults = true;
+            } else if (!returnResultsParam.equals("false")) {
+                throw new ValidationException("Invalid param for return_results, must be true or false");
+            }
+        }
 
         GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
         if (geneCoordinate == null) {
@@ -339,17 +343,48 @@ public class Controller {
         }
         log.info("Delegating to Controller.getVariants");
 
-        this.getVariants(
+        SwarmTableIdentifier swarmTableIdentifier = this.getVariants(
                 sourceCloud,
                 geneCoordinate.referenceName,
                 geneCoordinate.startPosition.toString(),
                 geneCoordinate.endPosition.toString(),
                 null,
                 null,
-                "true",
-                "true",
-                request,
-                response);
+                "true");
+
+        if (swarmTableIdentifier == null) {
+            throw new IllegalArgumentException("Failed to query for variants");
+        }
+
+        response.setHeader("Content-Type", "application/json");
+        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        jsonWriter.beginObject();
+
+        if (swarmTableIdentifier.databaseType.equals("athena")) {
+            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+        } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
+            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+        } else {
+            throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
+        }
+
+        if (!returnResults) {
+            jsonWriter.name("data_message").value("To return data in response, set return_results query parameter to true");
+        }
+
+        jsonWriter.endObject();
+//
+//        this.getVariants(
+//                sourceCloud,
+//                geneCoordinate.referenceName,
+//                geneCoordinate.startPosition.toString(),
+//                geneCoordinate.endPosition.toString(),
+//                null,
+//                null,
+//                "true",
+//                "true",
+//                request,
+//                response);
     }
 
     /**
@@ -657,16 +692,105 @@ public class Controller {
             value = "/variants",
             method = {RequestMethod.GET}
     )
-    private void getVariants(
+    private void executeVariants(
             @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
             @RequestParam(required = false, name = "start_position") String startPositionParam,
             @RequestParam(required = false, name = "end_position") String endPositionParam,
             @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
             @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            @RequestParam(required = false, name = "rsid") String rsidParam,
             @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
             @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
+    ) throws IOException, SQLException, InterruptedException {
+        boolean returnResults = false;
+        if (!StringUtils.isEmpty(returnResultsParam)) {
+            if (returnResultsParam.equals("true")) {
+                returnResults = true;
+            } else if (!returnResultsParam.equals("false")) {
+                throw new ValidationException("Invalid param for return_results, must be true or false");
+            }
+        }
+
+        SwarmTableIdentifier swarmTableIdentifier = getVariants(
+                sourceCloud,
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                rsidParam);
+
+        log.debug("Finished getVariants call");
+
+        if (swarmTableIdentifier == null) {
+            throw new RuntimeException("Failed to query variants");
+        }
+
+        log.debug("Writing response headers");
+        response.setHeader("X-Swarm-DatabaseType", swarmTableIdentifier.databaseType);
+        response.setHeader("X-Swarm-DatabaseName", swarmTableIdentifier.databaseName);
+        response.setHeader("X-Swarm-TableName", swarmTableIdentifier.tableName);
+        response.setHeader("Content-Type", "application/json");
+
+        //StringWriter stringWriter = new StringWriter();
+        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        jsonWriter.beginObject();
+
+        // serialize the table into the response, in JSON format.
+        if (swarmTableIdentifier.databaseType.equals("athena")) {
+            jsonWriter.name("athena").beginObject();
+            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            jsonWriter.endObject();
+        } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
+            jsonWriter.name("bigquery");
+            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+        } else {
+            throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
+        }
+
+        if (!returnResults) {
+            jsonWriter.name("data_message").value("To return data in response, set return_results query parameter to true");
+        }
+
+        jsonWriter.endObject();
+    }
+
+    public static class SwarmTableIdentifier {
+        String databaseType; // athena, bigquery, etc
+        String databaseName; // example: "swarm"
+        String tableName; // within the database, all information needed to reference the table
+    }
+
+    private SwarmTableIdentifier getVariants(
+            String sourceCloud,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange) throws InterruptedException, SQLException, IOException {
+        return getVariants(sourceCloud,
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                null);
+    }
+
+    private SwarmTableIdentifier getVariants(
+            String sourceCloud,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            String rsid
     ) throws IOException, SQLException, InterruptedException {
         VariantQuery variantQuery = new VariantQuery();
         boolean returnResults = false;
@@ -704,17 +828,10 @@ public class Controller {
                 validateBasesString(alternateBasesParam);
                 variantQuery.setAlternateBases(alternateBasesParam);
             }
-            if (!StringUtils.isEmpty(returnResultsParam)) {
-                if (returnResultsParam.equals("true")) {
-                    returnResults = true;
-                } else if (!returnResultsParam.equals("false")) {
-                    throw new ValidationException("Invalid param for return_results, must be true or false");
-                }
-            }
         } catch (ValidationException e) {
-            response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+            throw e;
+            //response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
             //return null;
-            return;
         }
 
         variantQuery.setTableIdentifier("variants");
@@ -761,7 +878,7 @@ public class Controller {
         if (sourceCloud.equals("bigquery") || sourceCloud.equals("all")) {
             doBigquery = true;
         }
-        if (sourceCloud.equals("all")) {
+        if (sourceCloud.equals("all") || (doBigquery && doAthena)) {
             doAll = true;
         }
 
@@ -787,10 +904,11 @@ public class Controller {
             executorService.awaitTermination(execTimeoutSeconds, TimeUnit.SECONDS);
             log.info("Successfully shut down executor service");
         } catch (InterruptedException e) {
-            response.sendError(
-                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                    "Query executor was interrupted unexpectedly");
-            return;
+            throw e;
+//            response.sendError(
+//                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+//                    "Query executor was interrupted unexpectedly");
+            //return null;
         }
 
         log.debug("Getting query result locations");
@@ -806,10 +924,11 @@ public class Controller {
             }
         } catch (ExecutionException | InterruptedException | TimeoutException e) {
             e.printStackTrace();
-            response.sendError(
-                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                    "Failed to retrieve query result location");
-            return;
+            throw new RuntimeException("Failed to retrieve query result location");
+//            response.sendError(
+//                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+//                    "Failed to retrieve query result location");
+            //return null;
         }
 
         String athenaResultDirectoryUrl = null, bigqueryResultDirectoryUrl = null;
@@ -829,6 +948,8 @@ public class Controller {
         boolean resultsInBigQuery = false, resultsInAthena = false;
         String bigqueryResultsTableFullName = null,
                 athenaResultsTableFullName = null;
+
+        SwarmTableIdentifier swarmTableIdentifier = new SwarmTableIdentifier();
 
         /*if (!doAll) {
             //String selectSimpleSql = "select * from %s";
@@ -884,8 +1005,8 @@ public class Controller {
                     "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
                     "     / \n" +
                     "    (\n" +
-                    "      (sum((cast(a.minor_af as float64))) \n" +
-                    "       + sum((cast(b.minor_af as float64))))\n" +
+                    "      (sum(coalesce(cast(a.minor_af as float64), 0)) \n" +
+                    "       + sum(coalesce(cast(b.minor_af as float64), 0))\n" +
                     "       * \n" +
                     "      (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)))" +
                     "    )\n" +
@@ -907,41 +1028,44 @@ public class Controller {
                     "Merging tables %s and %s and returning results",
                     bigqueryDestinationTable, importedAthenaTableName));
             String bigqueryMergedTableName = "merge_" + nonce;
-            bigqueryResultsTableFullName = String.format("%s.%s.%s");
+            //bigqueryResultsTableFullName = String.format("%s.%s.%s");
             TableId bigqueryMergedTableId = TableId.of(bigqueryDestinationDataset, bigqueryMergedTableName);
             // TODO
             TableResult tr = bigQueryClient.runSimpleQuery(mergeSql, Optional.of(bigqueryMergedTableId));
             //TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
             log.info("Finished merge query in BigQuery");
             log.info("Writing response headers");
-            response.setStatus(200);
-            response.setHeader("Content-Type", "text/csv");
+//            response.setStatus(200);
+//            response.setHeader("Content-Type", "text/csv");
             // Notify client of where the result data is stored
-            response.setHeader("X-Swarm-Result-Cloud", "bigquery");
+            //response.setHeader("X-Swarm-Result-Cloud", "bigquery");
+
             String bigqueryDestinationTableQualified = String.format("%s.%s.%s",
                 bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
-            response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
-            PrintWriter responseWriter = response.getWriter();
-            log.info("Writing data to response stream");
-
-            for (FieldValueList fvl : tr.iterateAll()) {
-                responseWriter.println(String.format(
-                        "%s,%d,%d,%s,%s,%f,%d",
-                        fvl.get("reference_name").getStringValue(),
-                        fvl.get("start_position").getLongValue(),
-                        fvl.get("end_position").getLongValue(),
-                        fvl.get("reference_bases").getStringValue(),
-                        fvl.get("alternate_bases").getStringValue(),
-                        fvl.get("minor_af").getDoubleValue(),
-                        fvl.get("allele_count").getLongValue()
-                ));
-            }
-            log.info("Finished writing response");
+            //response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
+            swarmTableIdentifier.databaseType = "bigquery";
+            swarmTableIdentifier.databaseName = bigQueryClient.getDatasetName();
+            swarmTableIdentifier.tableName = bigqueryDestinationTable;
+//            PrintWriter responseWriter = response.getWriter();
+//            log.info("Writing data to response stream");
+//
+//            for (FieldValueList fvl : tr.iterateAll()) {
+//                responseWriter.println(String.format(
+//                        "%s,%d,%d,%s,%s,%f,%d",
+//                        fvl.get("reference_name").getStringValue(),
+//                        fvl.get("start_position").getLongValue(),
+//                        fvl.get("end_position").getLongValue(),
+//                        fvl.get("reference_bases").getStringValue(),
+//                        fvl.get("alternate_bases").getStringValue(),
+//                        fvl.get("minor_af").getDoubleValue(),
+//                        fvl.get("allele_count").getLongValue()
+//                ));
+//            }
+//            log.info("Finished writing response");
             log.info("Deleting merged table using table result");
             bigQueryClient.deleteTableFromTableResult(tr);
 
-            //return new TableDatabasePair("bigquery", bigqueryDestinationTableQualified);
-            return;
+            return swarmTableIdentifier;
         } else {
             log.info("Performing rest of computation in Athena");
             String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
@@ -979,8 +1103,8 @@ public class Controller {
                     "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
                     "     / \n" +
                     "    (\n" +
-                    "      (sum((cast(a.minor_af as double))) \n" +
-                    "       + sum((cast(b.minor_af as double))))\n" +
+                    "      (sum(coalesce(cast(a.minor_af as double), 0)) \n" +
+                    "       + sum(coalesce(cast(b.minor_af as double), 0)))\n" +
                     "       * \n" +
                     "      (\n" +
                     "        sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))\n" +
@@ -1007,56 +1131,81 @@ public class Controller {
             GetQueryResultsResult queryResultsResult = athenaClient.executeQueryToResultSet(mergeSql);
             log.info("Finished merge query in Athena");
             log.info("Writing response headers");
-            response.setStatus(200);
-            response.setHeader("Content-Type", "text/csv");
+            //response.setStatus(200);
+            //response.setHeader("Content-Type", "text/csv");
             // Notify client of where the result data is stored
-            response.setHeader("X-Swarm-Result-Cloud", "athena");
+            //response.setHeader("X-Swarm-Result-Cloud", "athena");
             String athenaDestinationTableQualified = String.format("%s.%s",
                     athenaDestinationDataset, athenaDestinationTable);
-            response.setHeader("X-Swarm-Result-Table", athenaDestinationTableQualified);
+            //response.setHeader("X-Swarm-Result-Table", athenaDestinationTableQualified);
             com.amazonaws.services.athena.model.ResultSet rs = queryResultsResult.getResultSet();
             // iterate tokens
-            List<Row> rows = rs.getRows();
-            log.info("Writing data to response stream");
-
-            PrintWriter responseWriter = response.getWriter();
-            for (Row row : rows) {
-                List<Datum> data = row.getData();
-                responseWriter.println(String.format(
-                        "%s,%s,%s,%s,%s,%s,%s",
-                        data.get(0).getVarCharValue(),
-                        data.get(1).getVarCharValue(),
-                        data.get(2).getVarCharValue(),
-                        data.get(3).getVarCharValue(),
-                        data.get(4).getVarCharValue(),
-                        data.get(5).getVarCharValue(),
-                        data.get(6).getVarCharValue()
-                ));
-            }
-
-            log.info("Finished writing response");
+//            List<Row> rows = rs.getRows();
+//            log.info("Writing data to response stream");
+//
+//            PrintWriter responseWriter = response.getWriter();
+//            for (Row row : rows) {
+//                List<Datum> data = row.getData();
+//                responseWriter.println(String.format(
+//                        "%s,%s,%s,%s,%s,%s,%s",
+//                        data.get(0).getVarCharValue(),
+//                        data.get(1).getVarCharValue(),
+//                        data.get(2).getVarCharValue(),
+//                        data.get(3).getVarCharValue(),
+//                        data.get(4).getVarCharValue(),
+//                        data.get(5).getVarCharValue(),
+//                        data.get(6).getVarCharValue()
+//                ));
+//            }
+//
+//            log.info("Finished writing response");
             //return new TableDatabasePair("athena", athenaDestinationTableQualified);
-            return;
+            swarmTableIdentifier.databaseType = "athena";
+            swarmTableIdentifier.databaseName = athenaDestinationDataset;
+            swarmTableIdentifier.tableName = athenaDestinationTable;
+            return swarmTableIdentifier;
         }
     }
 
     /**
      * Use Case 4: annotation
      */
-    @RequestMapping(value = "/annotate", method = {RequestMethod.GET})
-    public void executeStatement(
+    @RequestMapping(value = "/annotate/{gene_label}", method = {RequestMethod.GET})
+    public void executeAnnotate(
+            @PathVariable(required = false, name = "gene_label") String geneLabel,
             @RequestParam(required = true, name = "sourceCloud") String sourceCloudParam,
             @RequestParam(required = true, name = "tableName") String tableName,
             @RequestParam(required = true, name = "destinationTableName") String destinationTableName,
             //@RequestBody String body,
             HttpServletRequest request, HttpServletResponse response
-    ) throws InterruptedException, IOException {
+    ) throws InterruptedException, IOException, TimeoutException, ExecutionException, SQLException {
         disallowQuoteSemicolonSpace(tableName);
 //        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
 //        byte[] bytes = Files.readAllBytes(Paths.get(MAIN_ROOT + "sql/annotation.sql"));
 //        String sql = new String(bytes, StandardCharsets.US_ASCII);
         String sql = loadSqlFile("annotation.sql");
 
+        SwarmTableIdentifier swarmTableIdentifier;
+
+        if (!StringUtils.isEmpty(geneLabel)) {
+            if (!StringUtils.isEmpty(sourceCloudParam) || !StringUtils.isEmpty(tableName)) {
+                throw new IllegalArgumentException("Cannot provide source table on gene based query");
+            }
+            GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+            if (geneCoordinate == null) {
+                throw new IllegalArgumentException("Gene could not be found in coordinates table");
+            }
+            //getVariantsByGene(geneLabel);
+            swarmTableIdentifier = this.getVariants(
+                    sourceCloudParam,
+                    geneCoordinate.referenceName,
+                    geneCoordinate.startPosition.toString(),
+                    geneCoordinate.endPosition.toString(),
+                    null,
+                    null,
+                    "true");
+
+        }
 
         if (sourceCloudParam.equals("athena")) {
             // This is just to create a new csv.gz dump of the input table
@@ -1148,6 +1297,7 @@ public class Controller {
         return String.format("Hello %s!", name);
     }
 
+    /*
     @RequestMapping(
             value = "/variants/by_gene/{gene_label}",
             produces = "application/json",
@@ -1347,12 +1497,12 @@ public class Controller {
                 jsonWriter.name("reference_bases").value(awsResultSet.getString(i++));
                 jsonWriter.name("alternate_bases").value(awsResultSet.getString(i++));
                 jsonWriter.name("minor_af").value(Double.valueOf(awsResultSet.getString(i++)));
-                /*jsonWriter.name("reference_name").value(data.get(i++).getVarCharValue());
-                jsonWriter.name("start_position").value(data.get(i++).getVarCharValue());
-                jsonWriter.name("end_position").value(data.get(i++).getVarCharValue());
-                jsonWriter.name("reference_bases").value(data.get(i++).getVarCharValue());
-                jsonWriter.name("alternate_bases").value(data.get(i++).getVarCharValue());
-                jsonWriter.name("minor_af").value(data.get(i++).getVarCharValue());*/
+//                jsonWriter.name("reference_name").value(data.get(i++).getVarCharValue());
+//                jsonWriter.name("start_position").value(data.get(i++).getVarCharValue());
+//                jsonWriter.name("end_position").value(data.get(i++).getVarCharValue());
+//                jsonWriter.name("reference_bases").value(data.get(i++).getVarCharValue());
+//                jsonWriter.name("alternate_bases").value(data.get(i++).getVarCharValue());
+//                jsonWriter.name("minor_af").value(data.get(i++).getVarCharValue());
                 jsonWriter.endObject();
                 awsResultCount++;
             }
@@ -1367,6 +1517,7 @@ public class Controller {
         long endTime = System.currentTimeMillis();
         System.out.printf("Writing response took %dms\n", (endTime - startTime));
     }
+    */
 
     private Boolean validateBooleanParam(String param) {
         if (param.equalsIgnoreCase("true")) {

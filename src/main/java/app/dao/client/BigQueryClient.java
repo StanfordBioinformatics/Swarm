@@ -9,6 +9,7 @@ import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.RetryOption;
 import com.google.cloud.bigquery.*;
 import com.google.cloud.storage.BlobId;
+import com.google.gson.stream.JsonWriter;
 import org.apache.logging.log4j.Logger;
 import org.threeten.bp.Duration;
 
@@ -304,7 +305,58 @@ public class BigQueryClient implements DatabaseClientInterface {
         return fvl.get("ct").getLongValue();
     }
 
+    public void serializeTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData) throws IOException, InterruptedException {
+        String query = String.format("select * from \"%s\".\"%s\"", this.datasetName, tableName);
+        TableResult tr = this.runSimpleQuery(query);
+        Schema schema = tr.getSchema();
+        FieldList fieldList = schema.getFields();
+        List<String> columnNames = new ArrayList<>();
+        for (Field f : fieldList) {
+            columnNames.add(f.getName());
+        }
+        Long totalRows = tr.getTotalRows();
 
+        // Numeric types in bigquery
+        // StandardSQLTypeName.FLOAT64
+        // StandardSQLTypeName.INT64
+        // StandardSQLTypeName.NUMERIC
+
+        //jsonWriter.beginObject();
+        jsonWriter.name("swarm_database_type").value("athena");
+        jsonWriter.name("swarm_database_name").value(this.datasetName);
+        jsonWriter.name("swarm_table_name").value(tableName);
+        jsonWriter.name("data_count").value(totalRows);
+
+        jsonWriter.name("headers").beginArray();
+        for (String columnName : columnNames) {
+            jsonWriter.value(columnName);
+        }
+        jsonWriter.endArray();
+
+        if (!writeData) {
+            jsonWriter.name("message").value("To return data in response, set return_results query parameter to true");
+            return;
+        }
+
+        jsonWriter.name("data").beginArray();
+        for (FieldValueList fieldValueList : tr.iterateAll()) {
+            for (String columnName : columnNames) {
+                StandardSQLTypeName columnType = fieldList.get(columnName).getType().getStandardType();
+                String valString = fieldValueList.get(columnName).getStringValue();
+                if (columnType.equals(StandardSQLTypeName.INT64)) {
+                    jsonWriter.value(StringUtils.toLongNullable(valString));
+                } else if (columnType.equals(StandardSQLTypeName.FLOAT64)) {
+                    jsonWriter.value(StringUtils.toDoubleNullable(valString));
+                } else if (columnType.equals(StandardSQLTypeName.NUMERIC)) {
+                    jsonWriter.value(StringUtils.toDoubleNullable(valString));
+                } else {
+                    jsonWriter.value(valString);
+                }
+            }
+        }
+        jsonWriter.endArray();
+        //jsonWriter.endObject();
+    }
 
     @Override
     public Iterable<Map<String,Object>> executeQuery(String query) {
@@ -559,6 +611,12 @@ public class BigQueryClient implements DatabaseClientInterface {
             builder.addNamedParameter("alternateBases",
                     QueryParameterValue.string(variantQuery.getAlternateBases()));
         }
+
+        if (variantQuery.getRsid() != null) {
+            wheres.add("id = @rsid");
+            builder.addNamedParameter("rsid", QueryParameterValue.string(variantQuery.getRsid()));
+        }
+
         // TODO add minorAF where clauses
 
         // construct where clause

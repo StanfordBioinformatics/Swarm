@@ -17,6 +17,8 @@ public class VariantQuery {
     private NumericValueComparisonOperator endPositionComparisonOperator;
     private NumericValueComparisonOperator minorAFPositionComparisonOperator;
 
+    private String rsid;
+
     private boolean usePositionAsRange = false;
 
     private boolean countOnly = false;
@@ -182,6 +184,14 @@ public class VariantQuery {
 
     public NumericValueComparisonOperator getMinorAFPositionOperator() {
         return this.minorAFPositionComparisonOperator;
+    }
+
+    public void setRsid(String rsid) {
+        this.rsid = rsid;
+    }
+
+    public String getRsid() {
+        return this.rsid;
     }
 
     /**

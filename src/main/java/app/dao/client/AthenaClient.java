@@ -3,23 +3,30 @@ package app.dao.client;
 import app.AppLogging;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
+import com.amazonaws.SdkClientException;
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.PropertiesFileCredentialsProvider;
+import com.amazonaws.protocol.MarshallingInfo;
+import com.amazonaws.protocol.ProtocolMarshaller;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.athena.AmazonAthenaClientBuilder;
 import com.amazonaws.services.athena.model.*;
 import com.amazonaws.services.s3.model.S3ObjectId;
+import com.google.gson.stream.JsonWriter;
 import com.simba.athena.jdbc.Driver;
 import org.apache.logging.log4j.Logger;
 
 import javax.annotation.Nullable;
+import javax.json.Json;
 import javax.validation.ValidationException;
 import javax.validation.constraints.NotNull;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.Writer;
 import java.sql.*;
+//import java.sql.ResultSet;
 import java.sql.ResultSet;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -167,6 +174,7 @@ public class AthenaClient {
             @Nullable String alternateBases,
             @Nullable Double minorAF,
             @Nullable Double minorAFMarginOfErrorPercentage,
+            @Nullable String rsid,
             //@NotNull String sourceDataset,
             @NotNull String sourceTable,
             @NotNull Optional<String> destinationDataset,
@@ -185,7 +193,7 @@ public class AthenaClient {
         variantQuery.setAlternateBases(alternateBases);
         variantQuery.setMinorAF(minorAF);
         variantQuery.setMinorAFMarginOfErrorPercentage(minorAFMarginOfErrorPercentage);
-
+        variantQuery.setRsid(rsid);
         variantQuery.setTableIdentifier(
                 String.join(".", new String[]{this.databaseName, sourceTable}));
         return executeVariantQuery(
@@ -211,10 +219,10 @@ public class AthenaClient {
      * 
      * @param variantQuery
      * //@param sourceTable
-     * @param destinationDataset
-     * @param destinationTable
-     * @param deleteResultTable
-     * @return
+     * @param destinationDataset dataset to put results into
+     * @param destinationTable table to put results into
+     * @param deleteResultTable whether to delete table after query, does not delete data files
+     * @return s3ObjectId for s3 directory where data files are stored
      */
     public S3ObjectId executeVariantQuery(
             @NotNull VariantQuery variantQuery,
@@ -357,6 +365,10 @@ public class AthenaClient {
         }
         if (variantQuery.getAlternateBases() != null) {
             wheres.add("alternate_bases = " + prepareSqlString(variantQuery.getAlternateBases()));
+        }
+
+        if (variantQuery.getRsid() != null) {
+            wheres.add("rsid = " + prepareSqlString(variantQuery.getRsid()));
         }
 
         // TODO add minorAF where clauses
@@ -573,10 +585,72 @@ public class AthenaClient {
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
-    /*@Override
-    public Iterable<Map<String, Object>> executeQuery(String query) {
-        return resultSetToIterableMap(executeQueryToResultSet(query));
-    }*/
+    /**
+     * Assumes writer is placed at the appropriate location of the stream.
+     *
+     * Writes a table dictionary data object at the root of wherever writer is pointing.
+     *
+     * @param tableName table to query and serialize
+     * @param jsonWriter JsonWriter to write JSON data into. This can wrap any Writer, for example StringWriter, HttpServletResponse.getWriter
+     */
+    public void serializeTableToJSON(String tableName, JsonWriter jsonWriter, boolean writeData) throws IOException {
+        String query = String.format("select * from \"%s\".\"%s\"", this.databaseName, tableName);
+        GetQueryResultsResult getQueryResultsResult = executeQueryToResultSet(query);
+        com.amazonaws.services.athena.model.ResultSet rs = getQueryResultsResult.getResultSet();
+        ResultSetMetadata resultSetMetadata = rs.getResultSetMetadata();
+        List<ColumnInfo> columnInfos = resultSetMetadata.getColumnInfo();
+        List<String> columnNames = new ArrayList<>();
+        columnInfos.forEach((columnInfo) -> {
+            columnNames.add(columnInfo.getName());
+        });
+        List<Row> rows = rs.getRows();
+
+        //JsonWriter jsonWriter = new JsonWriter(writer);
+        //jsonWriter.beginObject();
+        jsonWriter.name("swarm_database_type").value("athena");
+        jsonWriter.name("swarm_database_name").value(this.databaseName);
+        jsonWriter.name("swarm_table_name").value(tableName);
+        jsonWriter.name("data_count").value(rows.size());
+
+        jsonWriter.name("headers").beginArray();
+        for (String columnName : columnNames) {
+            jsonWriter.value(columnName);
+        }
+        jsonWriter.endArray();
+
+        if (!writeData) {
+            jsonWriter.name("message").value("To return data in response, set return_results query parameter to true");
+            return;
+        }
+
+        jsonWriter.name("data").beginArray();
+        boolean isFirstRow = true;
+        for (Row row : rows) {
+            if (isFirstRow) { // Athena includes table headers inside the row data as the first row
+                isFirstRow = false;
+                continue;
+            }
+            // each row is an array of the column values
+            jsonWriter.beginArray();
+            List<Datum> data = row.getData();
+            for (Datum datum : data) {
+                String val = datum.getVarCharValue();
+                Double d;
+                Long l;
+                // attempt to convert to numeric types
+                if ((d = StringUtils.toDoubleNullable(val)) != null) {
+                    jsonWriter.value(d);
+                } else if ((l = StringUtils.toLongNullable(val)) != null) {
+                    jsonWriter.value(l);
+                } else {
+                    jsonWriter.value(val);
+                }
+            }
+            jsonWriter.endArray();
+        }
+        jsonWriter.endArray();
+        //jsonWriter.endObject();
+    }
 
     private Iterable<Map<String,Object>> resultSetToIterableMap(ResultSet rs) {
         // get result set schema
@@ -599,7 +673,6 @@ public class AthenaClient {
                 for (String colLabel : fieldNames) {
                     rowMap.put(colLabel, rs.getString(colLabel));
                 }
-
 
                 /*Row row = rowsIterator.next();
                 List<Datum> data = row.getData();
@@ -625,30 +698,6 @@ public class AthenaClient {
         //rowsIterator.next();
 
     }
-
-    //@Override
-    /*public long executeCount(String tableName, String fieldName, Object fieldValue) {
-        String query = String.format(
-                "select count(*) as ct"
-                + " from %s.%s",
-                this.databaseName,
-                tableName
-        );
-        if (fieldName != null && fieldValue != null) {
-            if (fieldValue instanceof Number) {
-                query += String.format(
-                        " where %s = %f",
-                        fieldName, ((Number) fieldValue).doubleValue());
-            } else {
-                query += String.format(" where %s = \"%s\"", fieldName, fieldValue);
-            }
-        }
-        Iterable<Map<String,Object>> results = executeQuery(query);
-        String ct = results.iterator().next().get("ct").toString();
-        System.out.println("ct: " + ct);
-        return Long.valueOf(ct);
-    }*/
-
 
 
     public long executeCount(VariantQuery variantQuery) {
@@ -760,4 +809,6 @@ public class AthenaClient {
             throw new RuntimeException(e);
         }
     }
+
+
 }

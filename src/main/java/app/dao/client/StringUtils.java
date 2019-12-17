@@ -1,13 +1,17 @@
 package app.dao.client;
 
+import javax.annotation.Nullable;
 import javax.validation.ValidationException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
-import java.util.stream.Collectors;
+//import static org.springframework.util.StringUtils.*;
 
-public class StringUtils {
+
+public class StringUtils extends org.apache.commons.lang3.StringUtils {
 
     private static Character[] alphaNumericChars = null;
 
@@ -98,4 +102,37 @@ public class StringUtils {
             throw new ValidationException("String cannot contain whitespace: " + s);
         }
     }
+
+    public boolean isNumeric(String s) {
+        try {
+            new BigInteger(s);
+            return true;
+        } catch (NumberFormatException e1) {
+            try {
+                new BigDecimal(s);
+                return true;
+            } catch (NumberFormatException e2) {
+                return false;
+            }
+        }
+    }
+
+    @Nullable
+    public static Long toLongNullable(String s) {
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    @Nullable
+    public static Double toDoubleNullable(String s) {
+        try {
+            return Double.parseDouble(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
 }

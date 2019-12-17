@@ -47,12 +47,12 @@ public class OutputInputStream extends InputStream {
         // We're using (int)(-1) value to wake up blocking readQueue when blocked
         // at end of stream, so we need to truncate input -1 values to bytes explicitly.
         // Is probably best to just do this for all negative int values.
-        if (i < 0) {
-            int newVal = 0x000000FF & i;
-            //log.debug("Old value: %08X, newVal: %08X\n", i, newVal);
-            i = newVal;
-        }
-        this.readQueue.put(i);
+//        if (i < 0) {
+//            int newVal = 0x000000FF & i;
+//            //log.debug("Old value: %08X, newVal: %08X\n", i, newVal);
+//            i = newVal;
+//        }
+        this.readQueue.put(i & 0x000000FF);
     }
 
     @Override
@@ -65,11 +65,11 @@ public class OutputInputStream extends InputStream {
         }
     }
 
-    protected synchronized boolean isClosed() {
+    protected boolean isClosed() {
         return this.isClosed.get();
     }
 
-    private synchronized void setClosed() {
+    private void setClosed() {
         this.isClosed.set(true);
     }
 }
