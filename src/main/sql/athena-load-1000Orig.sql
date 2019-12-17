@@ -1,4 +1,4 @@
-CREATE EXTERNAL TABLE IF NOT EXISTS swarm.ThousandOrig_half2 (
+CREATE EXTERNAL TABLE IF NOT EXISTS swarm.thousandorig_half2 (
   `reference_name` string,
   `pos` string,
   `id` string,
