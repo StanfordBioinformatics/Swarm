@@ -135,4 +135,13 @@ public class StringUtils extends org.apache.commons.lang3.StringUtils {
         }
     }
 
+    public static boolean listContainsIgnoreCase(List<String> list, String s) {
+        for (String item : list) {
+            if (item.equalsIgnoreCase(s)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 }

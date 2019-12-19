@@ -13,9 +13,11 @@ import com.amazonaws.regions.Regions;
 import com.amazonaws.services.athena.AmazonAthena;
 import com.amazonaws.services.athena.AmazonAthenaClientBuilder;
 import com.amazonaws.services.athena.model.*;
+import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.services.s3.model.S3ObjectId;
 import com.google.gson.stream.JsonWriter;
 import com.simba.athena.jdbc.Driver;
+import org.aopalliance.intercept.MethodInterceptor;
 import org.apache.logging.log4j.Logger;
 
 import javax.annotation.Nullable;
@@ -26,10 +28,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.Writer;
 import java.sql.*;
-//import java.sql.ResultSet;
-import java.sql.ResultSet;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static app.dao.client.StringUtils.*;
 
@@ -299,8 +301,6 @@ public class AthenaClient {
     }
 
 
-
-
     public StartQueryExecutionRequest variantQueryToStartQueryExecutionRequest(
             @NotNull VariantQuery variantQuery,
             @NotNull ResultConfiguration resultConfiguration,
@@ -311,7 +311,9 @@ public class AthenaClient {
         StringBuilder sb = new StringBuilder();
         String quotedTable = quoteAthenaTableIdentifier(
                 this.databaseName + "." + variantQuery.getTableIdentifier());
-        String with = "with(format='TEXTFILE', field_delimiter=',')"; // automatically uses GZIP
+        // TODO specify format here
+        //String with = "with(format='TEXTFILE', field_delimiter=',')"; // automatically uses GZIP
+        String with = "with(format='PARQUET')";
         if (destinationTableName.isPresent()) {
             String quotedDestTable = quoteAthenaTableIdentifier(destinationTableName.get());
             // https://docs.aws.amazon.com/athena/latest/ug/create-table-as.html#ctas-table-properties
@@ -368,7 +370,7 @@ public class AthenaClient {
         }
 
         if (variantQuery.getRsid() != null) {
-            wheres.add("rsid = " + prepareSqlString(variantQuery.getRsid()));
+            wheres.add("id = " + prepareSqlString(variantQuery.getRsid()));
         }
 
         // TODO add minorAF where clauses
@@ -585,6 +587,121 @@ public class AthenaClient {
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
+    public void serializeMergedVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
+        serializeMergeVcfTablesToJson(tableName, null, jsonWriter);
+    }
+
+    public void serializeMergeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter) throws IOException {
+        String query;
+        if (tableName2 != null) {
+            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
+                    this.databaseName, tableName1, this.databaseName, tableName2);
+        } else {
+            query = String.format("select * from \"%s\".\"%s\"",
+                    this.databaseName, tableName1);
+        }
+        GetQueryResultsResult getQueryResultsResult = this.executeQueryToResultSet(query);
+        ResultSet rs = getQueryResultsResult.getResultSet();
+        List<Row> rows = rs.getRows();
+        List<String> columnNames = new ArrayList<>();
+        Row headerRow = rows.get(0);
+        for (Datum datum : headerRow.getData()) {
+            columnNames.add(datum.getVarCharValue());
+        }
+
+        // Any columns not in this list are assumed to be sample columns
+        String[] vcfColumns = new String[]{
+                "reference_name",
+                "start_position",
+                "end_position",
+                "id",
+                "reference_bases",
+                "alternate_bases",
+                "qual",
+                "filter",
+                "info",
+                "format"
+        };
+        List<String> vcfColumnsList = Arrays.asList(vcfColumns);
+        List<String> sampleColumnsList = new ArrayList<>();
+        for (String s : columnNames) {
+            if (!StringUtils.listContainsIgnoreCase(vcfColumnsList, s)) {
+                sampleColumnsList.add(s);
+            }
+        }
+        log.debug("Sample column headers: " + Arrays.toString(sampleColumnsList.toArray()));
+        List<String> columnsToWrite = Arrays.asList(
+                "reference_name", "start_position", "end_position", "id",
+                "reference_bases", "alternate_bases", "allele_count", "af");
+
+        jsonWriter.name("headers").beginArray();
+        for (String columnName : columnsToWrite) {
+            jsonWriter.value(columnName);
+        }
+        jsonWriter.endArray();
+
+        jsonWriter.name("data").beginArray();
+        Iterator<Row> rowIterator = rows.iterator();
+        rowIterator.next(); // skip header row from athena
+        while (rowIterator.hasNext()) {
+            Row row = rowIterator.next();
+            Function<String,String> getColVal =
+                    (String colName) ->
+                        row.getData().get(columnNames.indexOf(colName)).getVarCharValue();
+
+            String[] alternateBases = getColVal.apply("alternate_bases").split(",");
+            int altCount = alternateBases.length;
+
+            int[] alleleCounts = new int[altCount + 1];
+            Arrays.fill(alleleCounts, 0);
+
+            // process sample columns
+            for (String sampleColName : sampleColumnsList) {
+                String sampleValue = getColVal.apply(sampleColName);
+                if (sampleValue != null && sampleValue.length() > 0) {
+                    String[] sampleGTs = sampleValue.split("\\|");
+//                    log.debug("Inspecting sample values " + Arrays.toString(sampleGTs));
+                    for (String gtString : sampleGTs) {
+                        Long gtLong = StringUtils.toLongNullable(gtString);
+                        if (gtLong != null) {
+                            int gtInt = gtLong.intValue();
+//                            log.debug(String.format("Incrementing count for allele %s by 1, new count: %d",
+//                                    gtString, alleleCounts[gtInt]));
+                            alleleCounts[gtInt] = alleleCounts[gtInt] + 1;
+                        }
+                    }
+                }
+            }
+            // debug the counts
+            System.out.println(String.format(
+                    "reference_bases: %s, allele_count: %d",
+                    getColVal.apply("reference_bases"), alleleCounts[0]));
+            for (int i = 0; i < alternateBases.length; i++) {
+                System.out.println(String.format(
+                        "alternate_bases: %s, allele_count: %d",
+                        alternateBases[i], alleleCounts[i+1]));
+            }
+
+            // Write out the data, one row per each alternate bases
+            for (int i = 0; i < alternateBases.length; i++) {
+                jsonWriter.beginArray();
+                // do vcf columns in order
+                jsonWriter.value(getColVal.apply("reference_name"));
+                jsonWriter.value(StringUtils.toLongNullable(getColVal.apply("start_position")));
+                jsonWriter.value(StringUtils.toLongNullable(getColVal.apply("end_position")));
+                jsonWriter.value(getColVal.apply("id"));
+                jsonWriter.value(getColVal.apply("reference_bases"));
+                jsonWriter.value(alternateBases[i]);
+                jsonWriter.value(alleleCounts[i+1]);
+                double af = (double) alleleCounts[i+1] / (double) sampleColumnsList.size();
+                jsonWriter.value(af);
+                jsonWriter.endArray();
+            }
+
+        }
+        jsonWriter.endArray();
+    }
+
     /**
      * Assumes writer is placed at the appropriate location of the stream.
      *
@@ -652,7 +769,7 @@ public class AthenaClient {
         //jsonWriter.endObject();
     }
 
-    private Iterable<Map<String,Object>> resultSetToIterableMap(ResultSet rs) {
+    private Iterable<Map<String,Object>> resultSetToIterableMap(java.sql.ResultSet rs) {
         // get result set schema
         //List<ColumnInfo> columnInfoList = rs.getResultSetMetadata().getColumnInfo();
         ArrayList<String> fieldNames = new ArrayList<String>();

@@ -162,59 +162,57 @@ public class Main {
         System.out.println("Closed gcsFileUploadStream");
     }
 
-    public static void athenaQuery() throws IOException {
-        String databaseName = "swarm";
-        String credentialPath = "aws.properties";
-        AthenaClient athenaClient = new AthenaClient(databaseName, credentialPath);
-
-        String referenceName = "16";
-        Long startPosition = (long) 1000000;
-        Long endPosition = (long) startPosition + 100000;
-        String referenceBases = "A";
-        String alternateBases = "C";
-        Double minorAF = null;
-        Double minorAFMarginOfErrorPercentage = null;
-        String sourceTable = "thousandgenomes_vcf_half2";
-        //String destinationDataset = "swarm";
-        //String destinationTable = "temptable";
-        S3ObjectId resultS3Directory = athenaClient.executeVariantQuery(
-                referenceName,
-                startPosition,
-                endPosition,
-                referenceBases,
-                alternateBases,
-                minorAF,
-                minorAFMarginOfErrorPercentage,
-                sourceTable,
-                Optional.empty(), //Optional.of(destinationDataset),
-                Optional.empty(), //Optional.of(destinationTable),
-                Optional.of(true));
-        S3Client s3Client = new S3Client(credentialPath, Region.getRegion(Regions.US_EAST_2));
-        InputStream resultS3InputStream = new S3DirectoryGzipConcatInputStream(
-                s3Client,
-                "s3://" + resultS3Directory.getBucket() + "/" + resultS3Directory.getKey());
-
-        String gcpCredentialFilePath =
-                "gbsc-gcp-project-annohive-dev-4f980c934a52-defaultserviceaccount.json";
-        GCSClient gcsClient = new GCSClient(gcpCredentialFilePath);
-        String gcsDestinationUrl = "gs://krferrit-genome-queries-us-central1/athena-imports";
-        String s3DirectoryLastTerm = getLastNonEmptySegmentOfPath(resultS3Directory.getKey());//s3DirectoryTerms[s3DirectoryTerms.length-1];
-        String athenaExecutionIdAlphaNum = s3DirectoryLastTerm.replaceAll("-", "");
-        gcsDestinationUrl += s3DirectoryLastTerm + ".csv";
-        GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsDestinationUrl);
-
-        System.out.println("Transferring to gcs: " + gcsDestinationUrl);
-        resultS3InputStream.transferTo(gcsUploadStream);
-        gcsUploadStream.close();
-        resultS3InputStream.close();
-
-        BigQueryClient bigQueryClient = new BigQueryClient("swarm", gcpCredentialFilePath);
-        String bqTableName = "athena_import_" + athenaExecutionIdAlphaNum;
-        Table bigQueryTable = bigQueryClient.createVariantTableFromGcs(
-                bqTableName,
-                gcsDestinationUrl);
-
-
-
-    }
+//    public static void athenaQuery() throws IOException {
+//        String databaseName = "swarm";
+//        String credentialPath = "aws.properties";
+//        AthenaClient athenaClient = new AthenaClient(databaseName, credentialPath);
+//
+//        String referenceName = "16";
+//        Long startPosition = (long) 1000000;
+//        Long endPosition = (long) startPosition + 100000;
+//        String referenceBases = "A";
+//        String alternateBases = "C";
+//        Double minorAF = null;
+//        Double minorAFMarginOfErrorPercentage = null;
+//        String sourceTable = "thousandgenomes_vcf_half2";
+//        //String destinationDataset = "swarm";
+//        //String destinationTable = "temptable";
+//        S3ObjectId resultS3Directory = athenaClient.executeVariantQuery(
+//                referenceName,
+//                startPosition,
+//                endPosition,
+//                referenceBases,
+//                alternateBases,
+//                minorAF,
+//                minorAFMarginOfErrorPercentage,
+//                sourceTable,
+//                Optional.empty(), //Optional.of(destinationDataset),
+//                Optional.empty(), //Optional.of(destinationTable),
+//                Optional.of(true));
+//        S3Client s3Client = new S3Client(credentialPath, Region.getRegion(Regions.US_EAST_2));
+//        InputStream resultS3InputStream = new S3DirectoryGzipConcatInputStream(
+//                s3Client,
+//                "s3://" + resultS3Directory.getBucket() + "/" + resultS3Directory.getKey());
+//
+//        String gcpCredentialFilePath =
+//                "gbsc-gcp-project-annohive-dev-4f980c934a52-defaultserviceaccount.json";
+//        GCSClient gcsClient = new GCSClient(gcpCredentialFilePath);
+//        String gcsDestinationUrl = "gs://krferrit-genome-queries-us-central1/athena-imports";
+//        String s3DirectoryLastTerm = getLastNonEmptySegmentOfPath(resultS3Directory.getKey());//s3DirectoryTerms[s3DirectoryTerms.length-1];
+//        String athenaExecutionIdAlphaNum = s3DirectoryLastTerm.replaceAll("-", "");
+//        gcsDestinationUrl += s3DirectoryLastTerm + ".csv";
+//        GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsDestinationUrl);
+//
+//        System.out.println("Transferring to gcs: " + gcsDestinationUrl);
+//        resultS3InputStream.transferTo(gcsUploadStream);
+//        gcsUploadStream.close();
+//        resultS3InputStream.close();
+//
+//        BigQueryClient bigQueryClient = new BigQueryClient("swarm", gcpCredentialFilePath);
+//        String bqTableName = "athena_import_" + athenaExecutionIdAlphaNum;
+//        Table bigQueryTable = bigQueryClient.createVariantTableFromGcs(
+//                bqTableName,
+//                gcsDestinationUrl);
+//
+//    }
 }

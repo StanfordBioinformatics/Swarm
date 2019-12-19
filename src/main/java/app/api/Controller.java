@@ -198,6 +198,8 @@ public class Controller {
                 response);
     }
 
+
+    // TODO update for VCF table headers
     public void doCountOrStat(
             String referenceNameParam,
             String startPositionParam,
@@ -361,9 +363,11 @@ public class Controller {
         jsonWriter.beginObject();
 
         if (swarmTableIdentifier.databaseType.equals("athena")) {
-            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
         } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
-            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
         } else {
             throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
         }
@@ -742,11 +746,12 @@ public class Controller {
         // serialize the table into the response, in JSON format.
         if (swarmTableIdentifier.databaseType.equals("athena")) {
             jsonWriter.name("athena").beginObject();
-            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            jsonWriter.endObject();
+            //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
         } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
             jsonWriter.name("bigquery");
-            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+            bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
         } else {
             throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
         }
@@ -792,13 +797,15 @@ public class Controller {
             String positionRange,
             String rsid
     ) throws IOException, SQLException, InterruptedException {
-        VariantQuery variantQuery = new VariantQuery();
+        VariantQuery athenaVariantQuery = new VariantQuery();
+        VariantQuery bigqueryVariantQuery = new VariantQuery();
         boolean returnResults = false;
         try {
             if (!StringUtils.isEmpty(positionRange)) {
                 if (positionRange.equalsIgnoreCase("true")) {
                     log.debug("Using positions as a range");
-                    variantQuery.setUsePositionAsRange();
+                    athenaVariantQuery.setUsePositionAsRange();
+                    bigqueryVariantQuery.setUsePositionAsRange();
                 } else if (positionRange.equalsIgnoreCase("false")) {
                     // nothing
                 } else {
@@ -810,23 +817,32 @@ public class Controller {
             }
             if (!StringUtils.isEmpty(referenceNameParam)) {
                 validateReferenceName(referenceNameParam);
-                variantQuery.setReferenceName(referenceNameParam);
+                athenaVariantQuery.setReferenceName(referenceNameParam);
+                bigqueryVariantQuery.setReferenceName(referenceNameParam);
             }
             if (!StringUtils.isEmpty(startPositionParam)) {
                 Long startPosition = validateLongString(startPositionParam);
-                variantQuery.setStartPosition(startPosition);
+                athenaVariantQuery.setStartPosition(startPosition);
+                bigqueryVariantQuery.setStartPosition(startPosition);
             }
             if (!StringUtils.isEmpty(endPositionParam)) {
                 Long endPosition = validateLongString(endPositionParam);
-                variantQuery.setEndPosition(endPosition);
+                athenaVariantQuery.setEndPosition(endPosition);
+                bigqueryVariantQuery.setEndPosition(endPosition);
             }
             if (!StringUtils.isEmpty(referenceBasesParam)) {
                 validateBasesString(referenceBasesParam);
-                variantQuery.setReferenceBases(referenceBasesParam);
+                athenaVariantQuery.setReferenceBases(referenceBasesParam);
+                bigqueryVariantQuery.setReferenceBases(referenceBasesParam);
             }
             if (!StringUtils.isEmpty(alternateBasesParam)) {
                 validateBasesString(alternateBasesParam);
-                variantQuery.setAlternateBases(alternateBasesParam);
+                athenaVariantQuery.setAlternateBases(alternateBasesParam);
+                bigqueryVariantQuery.setAlternateBases(alternateBasesParam);
+            }
+            if (!StringUtils.isEmpty(rsid)) {
+                athenaVariantQuery.setRsid(rsid);
+                bigqueryVariantQuery.setRsid(rsid);
             }
         } catch (ValidationException e) {
             throw e;
@@ -834,7 +850,8 @@ public class Controller {
             //return null;
         }
 
-        variantQuery.setTableIdentifier("variants");
+        athenaVariantQuery.setTableIdentifier("thousandorig_half2_partitioned_bucketed");
+        bigqueryVariantQuery.setTableIdentifier("thousandorig_half1_clustered");
 
         String nonce = randomAlphaNumStringOfLength(18);
         String athenaDestinationDataset = "swarm";
@@ -848,7 +865,7 @@ public class Controller {
             @Override
             public S3ObjectId call() throws Exception {
                 S3ObjectId objectId = getAthenaClient().executeVariantQuery(
-                        variantQuery,
+                        athenaVariantQuery,
                         Optional.of(athenaDestinationDataset),
                         Optional.of(athenaDestinationTable),
                         Optional.of(athenaDeleteResultTable));
@@ -860,7 +877,7 @@ public class Controller {
             @Override
             public BlobId call() throws Exception {
                 BlobId blobId = getBigQueryClient().executeVariantQuery(
-                        variantQuery,
+                        bigqueryVariantQuery,
                         Optional.of(bigqueryDestinationDataset),
                         Optional.of(bigqueryDestinationTable),
                         Optional.of(bigqueryDeleteResultTable));
@@ -913,7 +930,7 @@ public class Controller {
 
         log.debug("Getting query result locations");
         try {
-            long getTimeoutSeconds = 60;
+            long getTimeoutSeconds = 60 * 10; // 10 minutes
             if (doAthena) {
                 athenaResultLocation = athenaFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
                 log.info("Got athena result location");
@@ -995,50 +1012,56 @@ public class Controller {
             log.info("Finished creating table: " + importedAthenaTableName);
 
             // join the tables together
+//            String mergeSql = "select\n" +
+//                    "  a.reference_name, \n" +
+//                    "  a.start_position,\n" +
+//                    "  a.end_position,\n" +
+//                    "  a.reference_bases,\n" +
+//                    "  a.alternate_bases,\n" +
+//                    "  (\n" +
+//                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
+//                    "     / \n" +
+//                    "    (\n" +
+//                    "      (sum(coalesce(cast(a.minor_af as float64), 0)) \n" +
+//                    "       + sum(coalesce(cast(b.minor_af as float64), 0))\n" +
+//                    "       * \n" +
+//                    "      (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)))" +
+//                    "    )\n" +
+//                    "   ) as minor_af,\n" +
+//                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
+//                    "from \n" +
+//                    "  swarm.%s b\n" +
+//                    "full outer join\n" +
+//                    "  swarm.%s a\n" +
+//                    "  on a.reference_name = b.reference_name\n" +
+//                    "  and a.start_position = b.start_position\n" +
+//                    "  and a.end_position = b.end_position\n" +
+//                    "  and a.reference_bases = b.reference_bases\n" +
+//                    "  and a.alternate_bases = b.alternate_bases\n" +
+//                    "group by a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases";
+            //mergeSql = String.format(mergeSql, bigqueryDestinationTable, importedAthenaTableName);
             String mergeSql = "select\n" +
-                    "  a.reference_name, \n" +
-                    "  a.start_position,\n" +
-                    "  a.end_position,\n" +
-                    "  a.reference_bases,\n" +
-                    "  a.alternate_bases,\n" +
-                    "  (\n" +
-                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
-                    "     / \n" +
-                    "    (\n" +
-                    "      (sum(coalesce(cast(a.minor_af as float64), 0)) \n" +
-                    "       + sum(coalesce(cast(b.minor_af as float64), 0))\n" +
-                    "       * \n" +
-                    "      (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)))" +
-                    "    )\n" +
-                    "   ) as minor_af,\n" +
-                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
-                    "from \n" +
-                    "  swarm.%s b\n" +
-                    "full outer join\n" +
-                    "  swarm.%s a\n" +
+                    "  *\n" +
+                    "from swarm.@bigqueryTable a\n" +
+                    "join swarm.@athenaTable b\n" +
                     "  on a.reference_name = b.reference_name\n" +
                     "  and a.start_position = b.start_position\n" +
                     "  and a.end_position = b.end_position\n" +
                     "  and a.reference_bases = b.reference_bases\n" +
-                    "  and a.alternate_bases = b.alternate_bases\n" +
-                    "group by a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases";
-            // first placeholder si bigquery tablename, second is athena tablename
-            mergeSql = String.format(mergeSql, bigqueryDestinationTable, importedAthenaTableName);
+                    "  and a.alternate_bases = b.alternate_bases";
+            // first placeholder is bigquery tablename, second is athena tablename
+            mergeSql = mergeSql.replace("@bigqueryTable", bigqueryDestinationTable);
+            mergeSql = mergeSql.replace("@athenaTable", importedAthenaTableName);
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     bigqueryDestinationTable, importedAthenaTableName));
             String bigqueryMergedTableName = "merge_" + nonce;
-            //bigqueryResultsTableFullName = String.format("%s.%s.%s");
             TableId bigqueryMergedTableId = TableId.of(bigqueryDestinationDataset, bigqueryMergedTableName);
             // TODO
             TableResult tr = bigQueryClient.runSimpleQuery(mergeSql, Optional.of(bigqueryMergedTableId));
             //TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
             log.info("Finished merge query in BigQuery");
             log.info("Writing response headers");
-//            response.setStatus(200);
-//            response.setHeader("Content-Type", "text/csv");
-            // Notify client of where the result data is stored
-            //response.setHeader("X-Swarm-Result-Cloud", "bigquery");
 
             String bigqueryDestinationTableQualified = String.format("%s.%s.%s",
                 bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
@@ -1046,25 +1069,8 @@ public class Controller {
             swarmTableIdentifier.databaseType = "bigquery";
             swarmTableIdentifier.databaseName = bigQueryClient.getDatasetName();
             swarmTableIdentifier.tableName = bigqueryDestinationTable;
-//            PrintWriter responseWriter = response.getWriter();
-//            log.info("Writing data to response stream");
-//
-//            for (FieldValueList fvl : tr.iterateAll()) {
-//                responseWriter.println(String.format(
-//                        "%s,%d,%d,%s,%s,%f,%d",
-//                        fvl.get("reference_name").getStringValue(),
-//                        fvl.get("start_position").getLongValue(),
-//                        fvl.get("end_position").getLongValue(),
-//                        fvl.get("reference_bases").getStringValue(),
-//                        fvl.get("alternate_bases").getStringValue(),
-//                        fvl.get("minor_af").getDoubleValue(),
-//                        fvl.get("allele_count").getLongValue()
-//                ));
-//            }
-//            log.info("Finished writing response");
             log.info("Deleting merged table using table result");
-            bigQueryClient.deleteTableFromTableResult(tr);
-
+            //bigQueryClient.deleteTableFromTableResult(tr);
             return swarmTableIdentifier;
         } else {
             log.info("Performing rest of computation in Athena");
@@ -1093,73 +1099,59 @@ public class Controller {
             log.info("Finished creating table: " + importedBigqueryTableName);
 
             // join the tables together
+//            String mergeSql = "select\n" +
+//                    "  a.reference_name, \n" +
+//                    "  a.start_position,\n" +
+//                    "  a.end_position,\n" +
+//                    "  a.reference_bases,\n" +
+//                    "  a.alternate_bases,\n" +
+//                    "  (\n" +
+//                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
+//                    "     / \n" +
+//                    "    (\n" +
+//                    "      (sum(coalesce(cast(a.minor_af as double), 0)) \n" +
+//                    "       + sum(coalesce(cast(b.minor_af as double), 0)))\n" +
+//                    "       * \n" +
+//                    "      (\n" +
+//                    "        sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))\n" +
+//                    "      )\n" +
+//                    "    )\n" +
+//                    "   ) as minor_af,\n" +
+//                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
+//                    "from \n" +
+//                    "  swarm.%s a\n" +
+//                    "full outer join\n" +
+//                    "  swarm.%s b\n" +
+//                    "  on a.reference_name = b.reference_name\n" +
+//                    "  and a.start_position = b.start_position\n" +
+//                    "  and a.end_position = b.end_position\n" +
+//                    "  and a.reference_bases = b.reference_bases\n" +
+//                    "  and a.alternate_bases = b.alternate_bases\n" +
+//                    "group by\n" +
+//                    "(a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases)";
+//            // 1st placeholder is athena table name, second is tablename from imported bigquery table
+//            mergeSql = String.format(mergeSql, athenaDestinationTable, importedBigqueryTableName);
             String mergeSql = "select\n" +
-                    "  a.reference_name, \n" +
-                    "  a.start_position,\n" +
-                    "  a.end_position,\n" +
-                    "  a.reference_bases,\n" +
-                    "  a.alternate_bases,\n" +
-                    "  (\n" +
-                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
-                    "     / \n" +
-                    "    (\n" +
-                    "      (sum(coalesce(cast(a.minor_af as double), 0)) \n" +
-                    "       + sum(coalesce(cast(b.minor_af as double), 0)))\n" +
-                    "       * \n" +
-                    "      (\n" +
-                    "        sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))\n" +
-                    "      )\n" +
-                    "    )\n" +
-                    "   ) as minor_af,\n" +
-                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
-                    "from \n" +
-                    "  swarm.%s a\n" +
-                    "full outer join\n" +
-                    "  swarm.%s b\n" +
+                    "  *\n" +
+                    "from swarm.@athenaTable a\n" +
+                    "join swarm.@bigqueryTable b\n" +
                     "  on a.reference_name = b.reference_name\n" +
                     "  and a.start_position = b.start_position\n" +
                     "  and a.end_position = b.end_position\n" +
                     "  and a.reference_bases = b.reference_bases\n" +
-                    "  and a.alternate_bases = b.alternate_bases\n" +
-                    "group by\n" +
-                    "(a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases)";
-            // 1st placeholder is athena table name, second is tablename from imported bigquery table
-            mergeSql = String.format(mergeSql, athenaDestinationTable, importedBigqueryTableName);
+                    "  and a.alternate_bases = b.alternate_bases";
+            // first placeholder is bigquery tablename, second is athena tablename
+            mergeSql = mergeSql.replace("@bigqueryTable", athenaDestinationTable);
+            mergeSql = mergeSql.replace("@athenaTable", importedBigqueryTableName);
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     athenaDestinationTable, importedBigqueryTableName));
             GetQueryResultsResult queryResultsResult = athenaClient.executeQueryToResultSet(mergeSql);
             log.info("Finished merge query in Athena");
             log.info("Writing response headers");
-            //response.setStatus(200);
-            //response.setHeader("Content-Type", "text/csv");
-            // Notify client of where the result data is stored
-            //response.setHeader("X-Swarm-Result-Cloud", "athena");
             String athenaDestinationTableQualified = String.format("%s.%s",
                     athenaDestinationDataset, athenaDestinationTable);
-            //response.setHeader("X-Swarm-Result-Table", athenaDestinationTableQualified);
             com.amazonaws.services.athena.model.ResultSet rs = queryResultsResult.getResultSet();
-            // iterate tokens
-//            List<Row> rows = rs.getRows();
-//            log.info("Writing data to response stream");
-//
-//            PrintWriter responseWriter = response.getWriter();
-//            for (Row row : rows) {
-//                List<Datum> data = row.getData();
-//                responseWriter.println(String.format(
-//                        "%s,%s,%s,%s,%s,%s,%s",
-//                        data.get(0).getVarCharValue(),
-//                        data.get(1).getVarCharValue(),
-//                        data.get(2).getVarCharValue(),
-//                        data.get(3).getVarCharValue(),
-//                        data.get(4).getVarCharValue(),
-//                        data.get(5).getVarCharValue(),
-//                        data.get(6).getVarCharValue()
-//                ));
-//            }
-//
-//            log.info("Finished writing response");
-            //return new TableDatabasePair("athena", athenaDestinationTableQualified);
             swarmTableIdentifier.databaseType = "athena";
             swarmTableIdentifier.databaseName = athenaDestinationDataset;
             swarmTableIdentifier.tableName = athenaDestinationTable;

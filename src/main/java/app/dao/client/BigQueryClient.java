@@ -14,6 +14,7 @@ import org.apache.logging.log4j.Logger;
 import org.threeten.bp.Duration;
 
 import javax.annotation.Nullable;
+import javax.json.Json;
 import javax.validation.constraints.NotNull;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -305,7 +306,138 @@ public class BigQueryClient implements DatabaseClientInterface {
         return fvl.get("ct").getLongValue();
     }
 
-    public void serializeTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData) throws IOException, InterruptedException {
+    public void serializeMergedVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
+        serializeMergeVcfTablesToJson(tableName, null, jsonWriter);
+    }
+
+    public void serializeMergeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
+            throws InterruptedException, IOException {
+        String query;
+        if (tableName2 != null) {
+            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
+                    this.datasetName, tableName1, this.datasetName, tableName2);
+        } else {
+            query = String.format("select * from \"%s\".\"%s\"",
+                    this.datasetName, tableName1);
+        }
+        TableResult tr = this.runSimpleQuery(query);
+        Schema schema = tr.getSchema();
+        FieldList fieldList = schema.getFields();
+        List<String> columnNames = new ArrayList<>();
+        for (Field f : fieldList) {
+            columnNames.add(f.getName());
+        }
+        Long totalRows = tr.getTotalRows();
+
+        // Any columns not in this list are assumed to be sample columns
+        String[] vcfColumns = new String[]{
+                "reference_name",
+                "start_position",
+                "end_position",
+                "id",
+                "reference_bases",
+                "alternate_bases",
+                "qual",
+                "filter",
+                "info",
+                "format"
+        };
+        List<String> vcfColumnsList = Arrays.asList(vcfColumns);
+        List<String> sampleColumnsList = new ArrayList<>();
+        for (String s : columnNames) {
+            if (!StringUtils.listContainsIgnoreCase(vcfColumnsList, s)) {
+                sampleColumnsList.add(s);
+            }
+        }
+        log.debug("Sample column headers: " + Arrays.toString(sampleColumnsList.toArray()));
+        List<String> columnsToWrite = Arrays.asList(
+                "reference_name", "start_position", "end_position", "id",
+                "reference_bases", "alternate_bases", "allele_count", "af");
+
+        jsonWriter.name("headers").beginArray();
+        for (String columnName : columnsToWrite) {
+            jsonWriter.value(columnName);
+        }
+        jsonWriter.endArray();
+
+        jsonWriter.name("data").beginArray();
+
+        for (FieldValueList fieldValueList : tr.iterateAll()) {
+            //List<String> rowData = new ArrayList<>();
+            String[] alternateBases = fieldValueList.get("alternate_bases").getStringValue().split(",");
+            int altCount = alternateBases.length;
+
+            int[] alleleCounts = new int[altCount + 1];
+            Arrays.fill(alleleCounts, 0);
+
+            // process sample columns, just obtain the allele count and allele frequency for each alt
+            // starts at 1 because 0 is the reference allele
+            for (String sampleColName : sampleColumnsList) {
+                String sampleValue = fieldValueList.get(sampleColName).getStringValue();
+                if (sampleValue != null && sampleValue.length() > 0) {
+                    String[] sampleGTs = sampleValue.split("\\|");
+//                    log.debug("Inspecting sample values " + Arrays.toString(sampleGTs));
+                    for (String gtString : sampleGTs) {
+                        Long gtLong = StringUtils.toLongNullable(gtString);
+                        if (gtLong != null) {
+                            int gtInt = gtLong.intValue();
+//                            log.debug(String.format("Incrementing count for allele %s by 1, new count: %d",
+//                                    gtString, alleleCounts[gtInt]));
+                            alleleCounts[gtInt] = alleleCounts[gtInt] + 1;
+                        }
+                    }
+                }
+            }
+            // debug the counts
+            System.out.println(String.format(
+                    "reference_bases: %s, allele_count: %d",
+                    fieldValueList.get("reference_bases").getStringValue(), alleleCounts[0]));
+            for (int i = 0; i < alternateBases.length; i++) {
+                System.out.println(String.format(
+                        "alternate_bases: %s, allele_count: %d",
+                        alternateBases[i], alleleCounts[i+1]));
+            }
+
+            // Write out the data, one row per each alternate bases
+            for (int i = 0; i < alternateBases.length; i++) {
+                jsonWriter.beginArray();
+                // do vcf columns in order
+                jsonWriter.value(fieldValueList.get("reference_name").getStringValue());
+                jsonWriter.value(fieldValueList.get("start_position").getLongValue());
+                jsonWriter.value(fieldValueList.get("end_position").getLongValue());
+                jsonWriter.value(fieldValueList.get("id").getStringValue());
+                jsonWriter.value(fieldValueList.get("reference_bases").getStringValue());
+                jsonWriter.value(alternateBases[i]);
+                jsonWriter.value(alleleCounts[i+1]);
+                double af = (double)alleleCounts[i+1] / (double)sampleColumnsList.size();
+                jsonWriter.value(af);
+                jsonWriter.endArray();
+//                for (String vcfColName : vcfColumns) {
+//                    if (!columnsToWrite.contains(vcfColName)) {
+//                        continue;
+//                    }
+//                    StandardSQLTypeName columnType = schema.getFields().get(vcfColName).getType().getStandardType();
+//                    FieldValue fieldValue = fieldValueList.get(vcfColName);
+//                    if (columnType.equals(StandardSQLTypeName.INT64)) {
+//                        jsonWriter.value(fieldValue.getLongValue());
+//                    } else if (columnType.equals(StandardSQLTypeName.FLOAT64)) {
+//                        jsonWriter.value(fieldValue.getDoubleValue());
+//                    } else if (columnType.equals(StandardSQLTypeName.NUMERIC)) {
+//                        jsonWriter.value(fieldValue.getNumericValue());
+//                    } else {
+//                        jsonWriter.value(fieldValue.getStringValue());
+//                    }
+//                }
+            }
+
+        }
+
+
+        jsonWriter.endArray();
+    }
+
+    public void serializeTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData)
+            throws IOException, InterruptedException {
         String query = String.format("select * from \"%s\".\"%s\"", this.datasetName, tableName);
         TableResult tr = this.runSimpleQuery(query);
         Schema schema = tr.getSchema();
@@ -320,8 +452,6 @@ public class BigQueryClient implements DatabaseClientInterface {
         // StandardSQLTypeName.FLOAT64
         // StandardSQLTypeName.INT64
         // StandardSQLTypeName.NUMERIC
-
-        //jsonWriter.beginObject();
         jsonWriter.name("swarm_database_type").value("athena");
         jsonWriter.name("swarm_database_name").value(this.datasetName);
         jsonWriter.name("swarm_table_name").value(tableName);
@@ -342,20 +472,19 @@ public class BigQueryClient implements DatabaseClientInterface {
         for (FieldValueList fieldValueList : tr.iterateAll()) {
             for (String columnName : columnNames) {
                 StandardSQLTypeName columnType = fieldList.get(columnName).getType().getStandardType();
-                String valString = fieldValueList.get(columnName).getStringValue();
+                FieldValue fieldValue = fieldValueList.get(columnName);
                 if (columnType.equals(StandardSQLTypeName.INT64)) {
-                    jsonWriter.value(StringUtils.toLongNullable(valString));
+                    jsonWriter.value(fieldValue.getLongValue());
                 } else if (columnType.equals(StandardSQLTypeName.FLOAT64)) {
-                    jsonWriter.value(StringUtils.toDoubleNullable(valString));
+                    jsonWriter.value(fieldValue.getDoubleValue());
                 } else if (columnType.equals(StandardSQLTypeName.NUMERIC)) {
-                    jsonWriter.value(StringUtils.toDoubleNullable(valString));
+                    jsonWriter.value(fieldValue.getNumericValue());
                 } else {
-                    jsonWriter.value(valString);
+                    jsonWriter.value(fieldValue.getStringValue());
                 }
             }
         }
         jsonWriter.endArray();
-        //jsonWriter.endObject();
     }
 
     @Override
@@ -461,7 +590,6 @@ public class BigQueryClient implements DatabaseClientInterface {
             throw new RuntimeException("Failed to delete table: " + datasetName + "." + tableName);
         }
     }
-
 
 
     public Table createAnnotationTableFromGcs(String tableName, String gcsDirectoryUrl) throws IOException {
@@ -572,11 +700,10 @@ public class BigQueryClient implements DatabaseClientInterface {
         // position parameters
         if (variantQuery.getUsePositionAsRange()) {
             // range based is a special case
-            // TODO convert to prepared statement format
             String whereTerm =
                     " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
                             + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
-                            + " or (start_position < %s and end_position > %s))";
+                            + " or (start_position < %s and end_position > %s))"; // interval fully contains a gene
             String start = variantQuery.getStartPosition() != null ?
                     variantQuery.getStartPosition().toString()
                     : "0";
