@@ -1,6 +1,8 @@
 package app;
 
 import app.dao.client.AthenaClient;
+import app.dao.client.StringUtils;
+import com.amazonaws.services.athena.model.Datum;
 import com.amazonaws.services.athena.model.GetQueryResultsResult;
 import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.services.athena.model.Row;
@@ -11,51 +13,27 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public class Test {
 
-    public static void main(String[] args) {
-
-        //ThreadPoolExecutor threadPool = new ThreadPoolExecutor(10, 10, 1000, TimeUnit.SECONDS, new ConcurrentLinkedQueue<Runnable>());
-
-        //ExecutorService es = Executors.newFixedThreadPool(2);
-        ExecutorService es = Executors.newSingleThreadExecutor();
-        Runnable r1 = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Thread.sleep(5000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                System.out.println("In Thread 1");
-            }
-        };
-        Runnable r2 = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Thread.sleep(5000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                System.out.println("In Thread 2");
-            }
-        };
-        Runnable r3 = new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    Thread.sleep(5000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-                System.out.println("In Thread 3");
-            }
-        };
-        es.submit(r1);
-        es.submit(r2);
-        es.submit(r3);
-
+    public static String getSubstringAfter(String s, String delim) {
+        int idx = s.indexOf(delim);
+        if (idx > -1) {
+            return s.substring(idx + 1);
+        }
+        return s;
     }
 
+    public static void main(String[] args) {
+        getTableColumns();
+    }
+
+    public static void getTableColumns() {
+        String awsCredentialFilePath = "aws.properties";
+        AthenaClient athenaClient = new AthenaClient("swarm", awsCredentialFilePath);
+        String tableName = "thousandorig_half2_partitioned_bucketed_snappy;";
+        List<String> columns = athenaClient.getTableColumns(tableName);
+        for (String s : columns) {
+            System.out.println(s);
+        }
+    }
 
     public static void test1() {
         String awsCredentialFilePath = "aws.properties";

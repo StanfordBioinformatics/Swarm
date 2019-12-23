@@ -7,7 +7,6 @@ import org.apache.logging.log4j.Logger;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
 
@@ -17,8 +16,8 @@ import java.util.zip.GZIPInputStream;
  * <br>
  * Uses host temp directory, and files saved there are deleted when the stream is closed.
  */
-public class S3DirectoryGzipConcatInputStream extends InputStream {
-    private Logger log = AppLogging.getLogger(S3DirectoryGzipConcatInputStream.class);
+public class S3DirectoryConcatInputStream extends InputStream {
+    private Logger log = AppLogging.getLogger(S3DirectoryConcatInputStream.class);
 
     private Path outFilePath;
     private FileInputStream outFileInputStream;
@@ -33,28 +32,36 @@ public class S3DirectoryGzipConcatInputStream extends InputStream {
      * @param client
      * @param s3DirectoryUrl
      */
-    public S3DirectoryGzipConcatInputStream(S3Client client, String s3DirectoryUrl) throws IOException {
+    public S3DirectoryConcatInputStream(S3Client client, String s3DirectoryUrl, boolean isGzip) throws IOException {
         outFilePath = Files.createTempFile(
                 "athena-table-",
                 ".tmp");
         log.info("Using temp file: " + outFilePath.toString());
         OutputStream fileOutputStream = new FileOutputStream(outFilePath.toFile());
 
-        // Download all directory contents (still gzipped)
+        // Download all directory contents (possibly gzipped)
         List<S3ObjectId> directoryObjects = client.listDirectory(s3DirectoryUrl);
         for (S3ObjectId objectId : directoryObjects) {
             InputStream is = client.getInputStream(objectId);
-            GZIPInputStream gunzipStream = new GZIPInputStream(is);
-            gunzipStream.transferTo(fileOutputStream);
-            gunzipStream.close(); // theoretically closes 'is' as well
+            if (isGzip) {
+                GZIPInputStream gunzipStream = new GZIPInputStream(is);
+                gunzipStream.transferTo(fileOutputStream);
+                gunzipStream.close(); // theoretically closes 'is' as well
+            } else {
+                is.transferTo(fileOutputStream);
+            }
             is.close();
             String s3Path = "s3://" + objectId.getBucket() + "/" + objectId.getKey();
-            log.debug("Downloaded and decompressed s3 file: " + s3Path);
+            log.debug("Downloaded and s3 file: " + s3Path);
         }
         fileOutputStream.flush();
         fileOutputStream.close();
 
         outFileInputStream = new FileInputStream(outFilePath.toFile());
+    }
+
+    public S3DirectoryConcatInputStream(S3Client client, String s3DirectoryUrl) throws IOException {
+        this(client, s3DirectoryUrl, false);
     }
 
     @Override

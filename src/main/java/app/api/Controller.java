@@ -13,7 +13,6 @@ import com.google.cloud.storage.BlobId;
 import com.google.gson.stream.JsonWriter;
 import org.apache.logging.log4j.Logger;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
-//import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Nullable;
@@ -30,7 +29,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.sql.ResultSet;
 
 import static app.dao.client.StringUtils.*;
 
@@ -55,6 +53,24 @@ public class Controller {
     //private Region awsRegion = Region.getRegion(Regions.US_EAST_2);
     private Region awsRegion = Region.getRegion(Regions.US_WEST_1);
 
+    final static String[] vcfColumns = new String[]{
+            "reference_name",
+            "start_position",
+            "end_position",
+            "id",
+            "reference_bases",
+            "alternate_bases",
+            "qual",
+            "filter",
+            "info",
+            "format"
+    };
+
+    // NOTE: bigquery identifiers are case sensitive, athena are not
+    final static String athenaVcfTable = "thousandorig_half2_partitioned_bucketed";
+    final static String bigqueryVcfTable = "thousandorig_half1_clustered";
+    final static String athenaAnnotationTable = "hg19_variant_9b_table_part";
+    final static String bigqueryAnnotationTable = "hg19_Variant_9B_Table";
 
     public Controller() {
         getBigQueryClient();
@@ -89,20 +105,6 @@ public class Controller {
         public String referenceName;
         public Long startPosition;
         public Long endPosition;
-    }
-
-    public class TableDatabasePair {
-        private String tableName;
-        private String databaseName;
-
-        public TableDatabasePair(String tableName, String databaseName) {
-            this.tableName = tableName;
-            this.databaseName = databaseName;
-        }
-
-        public String getTableName() {return this.tableName;}
-
-        public String getDatabaseName() {return this.databaseName;}
     }
 
     public String loadSqlFile(String basename) throws IOException {
@@ -215,9 +217,9 @@ public class Controller {
             if (!StringUtils.isEmpty(positionRange)) {
                 if (positionRange.equalsIgnoreCase("true")) {
                     log.debug("Using positions as a range");
-                    variantQuery.setUsePositionAsRange();
+                    variantQuery.setUsePositionAsRange(true);
                 } else if (positionRange.equalsIgnoreCase("false")) {
-                    // nothing
+                    variantQuery.setUsePositionAsRange(false);
                 } else {
                     throw new ValidationException("Invalid param for position_range, must be true or false");
                 }
@@ -329,7 +331,7 @@ public class Controller {
             @RequestParam(required = false, defaultValue = "all", name = "sourceCloud") String sourceCloud,
             @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
-    ) throws IOException, SQLException, InterruptedException, TimeoutException, ExecutionException {
+    ) throws IOException, InterruptedException, TimeoutException, ExecutionException {
         boolean returnResults = false;
         if (!StringUtils.isEmpty(returnResultsParam)) {
             if (returnResultsParam.equals("true")) {
@@ -347,12 +349,14 @@ public class Controller {
 
         SwarmTableIdentifier swarmTableIdentifier = this.getVariants(
                 sourceCloud,
+                Optional.empty(),
                 geneCoordinate.referenceName,
                 geneCoordinate.startPosition.toString(),
                 geneCoordinate.endPosition.toString(),
                 null,
                 null,
-                "true");
+                "true",
+                null);
 
         if (swarmTableIdentifier == null) {
             throw new IllegalArgumentException("Failed to query for variants");
@@ -364,10 +368,15 @@ public class Controller {
 
         if (swarmTableIdentifier.databaseType.equals("athena")) {
             //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+            // TODO
+            //athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
         } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
             //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+            // TODO
+            //bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+
         } else {
             throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
         }
@@ -443,6 +452,26 @@ public class Controller {
         Map<String,Map<String,List<String>>> retMap = new HashMap<>();
         retMap.put("half1", resultsHalf1);
         retMap.put("half2", resultsHalf2);
+        return retMap;
+    }
+
+    private Map<String,List<String>> getSampleLocations()
+            throws IOException, InterruptedException {
+        String sql = loadSqlFile("superpopulation-samples.sql");
+        List<String> half1List = new ArrayList<>();
+        List<String> half2List = new ArrayList<>();
+        TableResult tr = bigQueryClient.runSimpleQuery(sql);
+        Iterable<FieldValueList> fvlIterator = tr.iterateAll();
+        for (FieldValueList fvl : fvlIterator) {
+            String sp = fvl.get("SuperPopulation").getStringValue();
+            String half1 = fvl.get("Half1").getStringValue();
+            String half2 = fvl.get("Half2").getStringValue();
+            half1List.addAll(Arrays.asList(half1.split(",")));
+            half2List.addAll(Arrays.asList(half2.split(",")));
+        }
+        Map<String,List<String>> retMap = new HashMap<>();
+        retMap.put("half1", half1List);
+        retMap.put("half2", half2List);
         return retMap;
     }
 
@@ -697,7 +726,7 @@ public class Controller {
             method = {RequestMethod.GET}
     )
     private void executeVariants(
-            @RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
+            //@RequestParam(required = false, name = "cloud", defaultValue = "all") String sourceCloud,
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
             @RequestParam(required = false, name = "start_position") String startPositionParam,
             @RequestParam(required = false, name = "end_position") String endPositionParam,
@@ -707,7 +736,7 @@ public class Controller {
             @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
             @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
-    ) throws IOException, SQLException, InterruptedException {
+    ) throws IOException, SQLException, InterruptedException, TimeoutException, ExecutionException {
         boolean returnResults = false;
         if (!StringUtils.isEmpty(returnResultsParam)) {
             if (returnResultsParam.equals("true")) {
@@ -717,44 +746,95 @@ public class Controller {
             }
         }
 
-        SwarmTableIdentifier swarmTableIdentifier = getVariants(
-                sourceCloud,
-                referenceNameParam,
-                startPositionParam,
-                endPositionParam,
-                referenceBasesParam,
-                alternateBasesParam,
-                positionRange,
-                rsidParam);
+
+        Callable<SwarmTableIdentifier> athenaCallable = new Callable<SwarmTableIdentifier>() {
+            @Override
+            public SwarmTableIdentifier call() throws Exception {
+                return getVariants(
+                        "athena",
+                        Optional.empty(),
+                        referenceNameParam,
+                        startPositionParam,
+                        endPositionParam,
+                        referenceBasesParam,
+                        alternateBasesParam,
+                        positionRange,
+                        rsidParam);
+            }
+        };
+        Callable<SwarmTableIdentifier> bigqueryCallable = new Callable<SwarmTableIdentifier>() {
+            @Override
+            public SwarmTableIdentifier call() throws Exception {
+                return getVariants(
+                        "bigquery",
+                        Optional.empty(),
+                        referenceNameParam,
+                        startPositionParam,
+                        endPositionParam,
+                        referenceBasesParam,
+                        alternateBasesParam,
+                        positionRange,
+                        rsidParam);
+            }
+        };
+        log.info("Submitting callables for athena and bigquery");
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+        Future<SwarmTableIdentifier> athenaFuture = executorService.submit(athenaCallable);
+        Future<SwarmTableIdentifier> bigqueryFuture = executorService.submit(bigqueryCallable);
+        executorService.awaitTermination(30, TimeUnit.MINUTES);
+        executorService.shutdown();
+
+        SwarmTableIdentifier athenaTableIdentifier = athenaFuture.get(10, TimeUnit.MINUTES);
+        SwarmTableIdentifier bigqueryTableIdentifier = bigqueryFuture.get(10, TimeUnit.MINUTES);
+
+//        SwarmTableIdentifier swarmTableIdentifier = getVariants(
+//                sourceCloud,
+//                Optional.empty(),
+//                referenceNameParam,
+//                startPositionParam,
+//                endPositionParam,
+//                referenceBasesParam,
+//                alternateBasesParam,
+//                positionRange,
+//                rsidParam);
 
         log.debug("Finished getVariants call");
 
-        if (swarmTableIdentifier == null) {
-            throw new RuntimeException("Failed to query variants");
-        }
+//        if (athenaTableIdentifier.size < bigqueryTableIdentifier.size) {
+//            log.debug("Move bigquery to athena");
+//        }
 
         log.debug("Writing response headers");
-        response.setHeader("X-Swarm-DatabaseType", swarmTableIdentifier.databaseType);
-        response.setHeader("X-Swarm-DatabaseName", swarmTableIdentifier.databaseName);
-        response.setHeader("X-Swarm-TableName", swarmTableIdentifier.tableName);
+//        response.setHeader("X-Swarm-DatabaseType", swarmTableIdentifier.databaseType);
+//        response.setHeader("X-Swarm-DatabaseName", swarmTableIdentifier.databaseName);
+//        response.setHeader("X-Swarm-TableName", swarmTableIdentifier.tableName);
         response.setHeader("Content-Type", "application/json");
 
         //StringWriter stringWriter = new StringWriter();
         JsonWriter jsonWriter = new JsonWriter(response.getWriter());
         jsonWriter.beginObject();
 
+        jsonWriter.name("athena").beginObject();
+        athenaClient.serializeTableToJSON(athenaTableIdentifier.tableName, jsonWriter, returnResults);
+        jsonWriter.endObject();
+
+        jsonWriter.name("bigquery").beginObject();
+        bigQueryClient.serializeTableToJson(bigqueryTableIdentifier.tableName, jsonWriter, returnResults);
+        jsonWriter.endObject();
+
         // serialize the table into the response, in JSON format.
-        if (swarmTableIdentifier.databaseType.equals("athena")) {
-            jsonWriter.name("athena").beginObject();
-            //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
-        } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
-            jsonWriter.name("bigquery");
-            //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
-        } else {
-            throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
-        }
+//        if (swarmTableIdentifier.databaseType.equals("athena")) {
+//            jsonWriter.name("athena").beginObject();
+//            //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+//            //athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+//        } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
+//            jsonWriter.name("bigquery").beginObject();
+//            //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
+//            //bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+//            bigQueryClient.serializeVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
+//        } else {
+//            throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
+//        }
 
         if (!returnResults) {
             jsonWriter.name("data_message").value("To return data in response, set return_results query parameter to true");
@@ -767,27 +847,70 @@ public class Controller {
         String databaseType; // athena, bigquery, etc
         String databaseName; // example: "swarm"
         String tableName; // within the database, all information needed to reference the table
+        // Optional
+        Long size = null;
+        String storageUrl = null;
     }
 
+//    private SwarmTableIdentifier getVariants(
+//            String sourceDatabaseType,
+//            Optional<String> destinationDatabaseType,
+//            String referenceNameParam,
+//            String startPositionParam,
+//            String endPositionParam,
+//            String referenceBasesParam,
+//            String alternateBasesParam,
+//            String positionRange) throws InterruptedException, IOException {
+//        return getVariants(sourceDatabaseType,
+//                destinationDatabaseType
+//                referenceNameParam,
+//                startPositionParam,
+//                endPositionParam,
+//                referenceBasesParam,
+//                alternateBasesParam,
+//                positionRange,
+//                null);
+//    }
+
     private SwarmTableIdentifier getVariants(
-            String sourceCloud,
+            String sourceDatabaseType,
+            Optional<String> destinationDatabaseType,
             String referenceNameParam,
             String startPositionParam,
             String endPositionParam,
             String referenceBasesParam,
             String alternateBasesParam,
-            String positionRange) throws InterruptedException, SQLException, IOException {
-        return getVariants(sourceCloud,
+            String positionRange,
+            String rsid) throws IOException, InterruptedException {
+        String sourceDatabaseName = "swarm";
+        String sourceTableName;
+        if (sourceDatabaseType.equals("athena")) {
+            sourceTableName = athenaVcfTable;
+        } else if (sourceDatabaseType.equals("bigquery")) {
+            sourceTableName = bigqueryVcfTable;
+        } else {
+            throw new ValidationException("Unknown sourceDatabaseType: " + sourceDatabaseType);
+        }
+
+        SwarmTableIdentifier swarmTableIdentifier = queryTableByVariantCoordinates(
+                sourceDatabaseType,
+                sourceDatabaseName,
+                sourceTableName,
+                destinationDatabaseType.isPresent() ?
+                        destinationDatabaseType.get() :
+                        sourceDatabaseType,
                 referenceNameParam,
                 startPositionParam,
                 endPositionParam,
                 referenceBasesParam,
                 alternateBasesParam,
                 positionRange,
-                null);
+                rsid);
+        log.info("Finished call to queryTableByVariantCoordinates for variants");
+        return swarmTableIdentifier;
     }
 
-    private SwarmTableIdentifier getVariants(
+    private SwarmTableIdentifier getVariantsOld(
             String sourceCloud,
             String referenceNameParam,
             String startPositionParam,
@@ -796,7 +919,7 @@ public class Controller {
             String alternateBasesParam,
             String positionRange,
             String rsid
-    ) throws IOException, SQLException, InterruptedException {
+    ) throws IOException, InterruptedException {
         VariantQuery athenaVariantQuery = new VariantQuery();
         VariantQuery bigqueryVariantQuery = new VariantQuery();
         boolean returnResults = false;
@@ -804,10 +927,11 @@ public class Controller {
             if (!StringUtils.isEmpty(positionRange)) {
                 if (positionRange.equalsIgnoreCase("true")) {
                     log.debug("Using positions as a range");
-                    athenaVariantQuery.setUsePositionAsRange();
-                    bigqueryVariantQuery.setUsePositionAsRange();
+                    athenaVariantQuery.setUsePositionAsRange(true);
+                    bigqueryVariantQuery.setUsePositionAsRange(true);
                 } else if (positionRange.equalsIgnoreCase("false")) {
-                    // nothing
+                    athenaVariantQuery.setUsePositionAsRange(false);
+                    bigqueryVariantQuery.setUsePositionAsRange(false);
                 } else {
                     throw new ValidationException("Invalid param for position_range, must be true or false");
                 }
@@ -846,12 +970,10 @@ public class Controller {
             }
         } catch (ValidationException e) {
             throw e;
-            //response.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-            //return null;
         }
 
-        athenaVariantQuery.setTableIdentifier("thousandorig_half2_partitioned_bucketed");
-        bigqueryVariantQuery.setTableIdentifier("thousandorig_half1_clustered");
+        athenaVariantQuery.setTableIdentifier(athenaVcfTable);
+        bigqueryVariantQuery.setTableIdentifier(bigqueryVcfTable);
 
         String nonce = randomAlphaNumStringOfLength(18);
         String athenaDestinationDataset = "swarm";
@@ -895,7 +1017,7 @@ public class Controller {
         if (sourceCloud.equals("bigquery") || sourceCloud.equals("all")) {
             doBigquery = true;
         }
-        if (sourceCloud.equals("all") || (doBigquery && doAthena)) {
+        if (doBigquery && doAthena) {
             doAll = true;
         }
 
@@ -962,26 +1084,533 @@ public class Controller {
             log.info("bigquery result size: " + bigqueryResultSize);
         }
 
+        Map<String,Map<String,List<String>>> superPopulationSamples =
+                getSuperPopulationSamples(Optional.empty());
+
         boolean resultsInBigQuery = false, resultsInAthena = false;
         String bigqueryResultsTableFullName = null,
                 athenaResultsTableFullName = null;
-
         SwarmTableIdentifier swarmTableIdentifier = new SwarmTableIdentifier();
 
-        /*if (!doAll) {
-            //String selectSimpleSql = "select * from %s";
-            if (doBigquery) {
-                resultsInBigQuery = true;
-                bigqueryResultsTableFullName = String.format("`%s.%s.%s`",
-                        bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
-            } else if (doAthena) {
-                resultsInAthena = true;
-                athenaResultsTableFullName = quoteAthenaTableIdentifier(String.format("%s.%s",
-                        athenaDestinationDataset, athenaDestinationTable));
-            } else {
-                throw new IllegalStateException("Invalid state");
+        if (athenaResultSize < bigqueryResultSize) {
+            log.info("Performing rest of computation in BigQuery");
+            String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
+            String gcsAthenaImportDirectory = pathJoin(
+                    bigQueryClient.getStorageBucket(),
+                    "athena-imports/" + athenaOutputId);
+            String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.parquet");
+            log.info("Copying athena output id: " + athenaOutputId
+                    + " from " + athenaResultDirectoryUrl
+                    + " to " + gcsAthenaImportFile);
+            GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsAthenaImportFile);
+            S3DirectoryConcatInputStream s3DirGzipInputStream =
+                    new S3DirectoryConcatInputStream(s3Client, athenaResultDirectoryUrl);
+            log.info("Initiating transfer");
+            s3DirGzipInputStream.transferTo(gcsUploadStream);
+            log.debug("CLosing S3 input stream");
+            s3DirGzipInputStream.close();
+            log.debug("Closing GCS output stream");
+            gcsUploadStream.close();
+            log.debug("Finished transfer from S3 to GCS");
+            // create the table from the file uploaded
+            String tableNameSafeAthenaOutputId = athenaOutputId.replaceAll("-", "");
+            log.debug("Converted athena output id from " + athenaOutputId +
+                    " to table name safe: " + tableNameSafeAthenaOutputId);
+            String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
+            log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
+
+            // Select the VCF columns and the sample columns for half2
+            //List<String> athenaColumns = athenaClient.getTableColumns(athenaDestinationTable);
+            List<String> athenaColumns = new ArrayList<>();
+            athenaColumns.addAll(Arrays.asList(vcfColumns));
+            for (String superPopulation : superPopulationSamples.get("half2").keySet()){
+                athenaColumns.addAll(superPopulationSamples.get("half2").get(superPopulation));
             }
-        } else*/ if (athenaResultSize < bigqueryResultSize) {
+            Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
+                    importedAthenaTableName, Arrays.asList(gcsAthenaImportFile), athenaColumns);
+            log.info("Finished creating table: " + importedAthenaTableName);
+
+            String mergeSql = bigQueryClient.getMergedVcfSelect(
+                    bigqueryDestinationTable, "a", importedAthenaTableName, "b");
+            log.info(String.format(
+                    "Merging tables %s and %s and returning results",
+                    bigqueryDestinationTable, importedAthenaTableName));
+            String bigqueryMergedTableName = "merge_" + nonce;
+            TableId bigqueryMergedTableId = TableId.of(bigqueryDestinationDataset, bigqueryMergedTableName);
+            // TODO
+            TableResult tr = bigQueryClient.runSimpleQuery(mergeSql, Optional.of(bigqueryMergedTableId));
+            //TableResult tr = bigQueryClient.runSimpleQuery(mergeSql);
+            log.info("Finished merge query in BigQuery");
+            log.info("Writing response headers");
+
+            String bigqueryDestinationTableQualified = String.format("%s.%s.%s",
+                    bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
+            //response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
+            swarmTableIdentifier.databaseType = "bigquery";
+            swarmTableIdentifier.databaseName = bigQueryClient.getDatasetName();
+            swarmTableIdentifier.tableName = bigqueryDestinationTable;
+            log.info("Deleting merged table using table result");
+            //bigQueryClient.deleteTableFromTableResult(tr);
+            return swarmTableIdentifier;
+        } else {
+            log.info("Performing rest of computation in Athena");
+            String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
+            String s3BigQueryImportDirectory = pathJoin(
+                    athenaClient.getStorageBucket(),
+                    "bigquery-imports/" + bigqueryOutputId + "/");
+            String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+            log.info("Copying bigquery output id: " + bigqueryOutputId
+                    + " from " + bigqueryResultDirectoryUrl
+                    + " to " + s3BigQueryImportFile);
+            S3UploadStream s3UploadStream = new S3UploadStream(s3Client, s3BigQueryImportFile);
+            GCSDirectoryConcatInputStream gcsDirGzipInputStream =
+                    new GCSDirectoryConcatInputStream(gcsClient, bigqueryResultDirectoryUrl);
+            log.info("Initiating transfer");
+            gcsDirGzipInputStream.transferTo(s3UploadStream);
+            log.debug("Closing GCS input stream");
+            gcsDirGzipInputStream.close();
+            log.debug("Closing S3 output stream");
+            s3UploadStream.close();
+            log.debug("Finished transfer from GCS to S3");
+            // create the table from the file uploaded
+            // Include the VCF columns and sample columns from half1
+            // List<String> bigqueryColumns = bigQueryClient.getTableColumns(bigqueryDestinationTable);
+            List<String> bigqueryColumns = new ArrayList<>();
+            bigqueryColumns.addAll(Arrays.asList(vcfColumns));
+            for (String superPopulation : superPopulationSamples.get("half1").keySet()){
+                bigqueryColumns.addAll(superPopulationSamples.get("half1").get(superPopulation));
+            }
+
+            String importedBigqueryTableName = "bigquery_import_" + bigqueryOutputId;
+            log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
+            athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory, bigqueryColumns);
+            log.info("Finished creating table: " + importedBigqueryTableName);
+
+            // join the tables together
+            String mergedTableName = "merged_" + nonce;
+            String mergeSql = athenaClient.getMergedVcfSelect(
+                    athenaDestinationTable, "a", importedBigqueryTableName, "b");
+            mergeSql = "create table "
+                    + quoteAthenaTableIdentifier(athenaDestinationDataset + "." + mergedTableName)
+                    //+ String.format("`%s`.`%s`", athenaDestinationDataset, mergedTableName)
+                    + " as \n" + mergeSql;
+            log.info(String.format(
+                    "Merging tables %s and %s and returning results",
+                    athenaDestinationTable, importedBigqueryTableName));
+            GetQueryResultsResult queryResultsResult = athenaClient.executeQueryToResultSet(mergeSql);
+            log.info("Finished merge query in Athena");
+            log.info("Writing response headers");
+            String athenaDestinationTableQualified = String.format("%s.%s",
+                    athenaDestinationDataset, athenaDestinationTable);
+            com.amazonaws.services.athena.model.ResultSet rs = queryResultsResult.getResultSet();
+            swarmTableIdentifier.databaseType = "athena";
+            swarmTableIdentifier.databaseName = athenaDestinationDataset;
+            swarmTableIdentifier.tableName = mergedTableName;
+            return swarmTableIdentifier;
+        }
+    }
+
+    // TODO
+    private SwarmTableIdentifier queryTableByVariantCoordinates(
+            String sourceDatabaseType,
+            String sourceDatabaseName, // TODO parametrize VariantQuery
+            String sourceTableName,
+            String destinationDatabaseType,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            String rsid
+    ) throws IOException, InterruptedException {
+        VariantQuery variantQuery = new VariantQuery();
+        boolean returnResults = false;
+        try {
+            if (!StringUtils.isEmpty(positionRange)) {
+                if (positionRange.equalsIgnoreCase("true")) {
+                    log.debug("Using positions as a range");
+                    variantQuery.setUsePositionAsRange(true);
+                } else if (positionRange.equalsIgnoreCase("false")) {
+                    variantQuery.setUsePositionAsRange(false);
+                } else {
+                    throw new ValidationException("Invalid param for position_range, must be true or false");
+                }
+            }
+            if (!StringUtils.isEmpty(sourceDatabaseType)) {
+                validateCloudParam(sourceDatabaseType);
+            }
+            if (!StringUtils.isEmpty(referenceNameParam)) {
+                validateReferenceName(referenceNameParam);
+                variantQuery.setReferenceName(referenceNameParam);
+            }
+            if (!StringUtils.isEmpty(startPositionParam)) {
+                Long startPosition = validateLongString(startPositionParam);
+                variantQuery.setStartPosition(startPosition);
+            }
+            if (!StringUtils.isEmpty(endPositionParam)) {
+                Long endPosition = validateLongString(endPositionParam);
+                variantQuery.setEndPosition(endPosition);
+            }
+            if (!StringUtils.isEmpty(referenceBasesParam)) {
+                validateBasesString(referenceBasesParam);
+                variantQuery.setReferenceBases(referenceBasesParam);
+            }
+            if (!StringUtils.isEmpty(alternateBasesParam)) {
+                validateBasesString(alternateBasesParam);
+                variantQuery.setAlternateBases(alternateBasesParam);
+            }
+            if (!StringUtils.isEmpty(rsid)) {
+                variantQuery.setRsid(rsid);
+            }
+        } catch (ValidationException e) {
+            log.error("Failed to validate parameters");
+            throw e;
+        }
+
+        variantQuery.setTableIdentifier(sourceTableName);
+
+        String nonce = randomAlphaNumStringOfLength(12);
+        String destinationDataset = "swarm";
+        String destinationTableName = "genome_query_" + nonce;
+        boolean deleteResultTable = false;
+        SwarmTableIdentifier swarmTableIdentifier = new SwarmTableIdentifier();
+
+        if (sourceDatabaseType.equals("athena")) {
+            S3ObjectId s3ObjectId = getAthenaClient().executeVariantQuery(
+                    variantQuery,
+                    Optional.of(destinationDataset),
+                    Optional.of(destinationTableName),
+                    Optional.of(deleteResultTable));
+            String athenaResultDirectoryUrl = s3Client.s3ObjectIdToString(s3ObjectId);
+            long athenaResultSize = s3Client.getDirectorySize(athenaResultDirectoryUrl);
+
+            if (destinationDatabaseType.equals("athena")) {
+                log.info("Keeping results in athena");
+                swarmTableIdentifier.databaseType = sourceDatabaseType;
+                swarmTableIdentifier.databaseName = destinationDataset;
+                swarmTableIdentifier.tableName = destinationTableName;
+                swarmTableIdentifier.size = athenaResultSize;
+                swarmTableIdentifier.storageUrl = athenaResultDirectoryUrl;
+            } else if (destinationDatabaseType.equals("bigquery")) {
+                log.info("Moving results to athena");
+                String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
+                String gcsAthenaImportDirectory = pathJoin(
+                        bigQueryClient.getStorageBucket(),
+                        "athena-imports/" + athenaOutputId);
+                String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.parquet");
+                log.info("Copying athena output id: " + athenaOutputId
+                        + " from " + athenaResultDirectoryUrl
+                        + " to " + gcsAthenaImportFile);
+                GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsAthenaImportFile);
+                S3DirectoryConcatInputStream s3DirGzipInputStream =
+                        new S3DirectoryConcatInputStream(s3Client, athenaResultDirectoryUrl);
+                log.info("Initiating transfer");
+                s3DirGzipInputStream.transferTo(gcsUploadStream);
+                log.debug("CLosing S3 input stream");
+                s3DirGzipInputStream.close();
+                log.debug("Closing GCS output stream");
+                gcsUploadStream.close();
+                log.debug("Finished transfer from S3 to GCS");
+                // create the table from the file uploaded
+                String tableNameSafeAthenaOutputId = athenaOutputId.replaceAll("-", "");
+                log.debug("Converted athena output id from " + athenaOutputId +
+                        " to table name safe: " + tableNameSafeAthenaOutputId);
+                String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
+                log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
+                List<String> athenaColumns = athenaClient.getTableColumns(sourceTableName);
+                Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
+                        importedAthenaTableName, Arrays.asList(gcsAthenaImportFile), athenaColumns);
+                log.info("Finished creating table: " + importedAthenaTableName);
+                swarmTableIdentifier.databaseType = destinationDatabaseType;
+                swarmTableIdentifier.databaseName = destinationDataset;
+                swarmTableIdentifier.tableName = importedAthenaTableName;
+                swarmTableIdentifier.size = athenaResultSize;
+                swarmTableIdentifier.storageUrl = athenaResultDirectoryUrl;
+            }
+        } else if (sourceDatabaseType.equals("bigquery")) {
+            BlobId blobId = getBigQueryClient().executeVariantQuery(
+                    variantQuery,
+                    Optional.of(destinationDataset),
+                    Optional.of(destinationTableName),
+                    Optional.of(deleteResultTable));
+            String bigqueryResultDirectoryUrl = gcsClient.blobIdToString(blobId);
+            long bigqueryResultSize = gcsClient.getDirectorySize(bigqueryResultDirectoryUrl);
+
+            if (destinationDatabaseType.equals("bigquery")) {
+                log.info("Keeping results in bigquery");
+                swarmTableIdentifier.databaseType = sourceDatabaseType;
+                swarmTableIdentifier.databaseName = destinationDataset;
+                swarmTableIdentifier.tableName = destinationTableName;
+                swarmTableIdentifier.size = bigqueryResultSize;
+                swarmTableIdentifier.storageUrl = bigqueryResultDirectoryUrl;
+            } else if (destinationDatabaseType.equals("athena")) {
+                log.info("Moving results to athena");
+                String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
+                String s3BigQueryImportDirectory = pathJoin(
+                        athenaClient.getStorageBucket(),
+                        "bigquery-imports/" + bigqueryOutputId + "/");
+                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+                log.info("Copying bigquery output id: " + bigqueryOutputId
+                        + " from " + bigqueryResultDirectoryUrl
+                        + " to " + s3BigQueryImportFile);
+                S3UploadStream s3UploadStream = new S3UploadStream(s3Client, s3BigQueryImportFile);
+                GCSDirectoryConcatInputStream gcsDirGzipInputStream =
+                        new GCSDirectoryConcatInputStream(gcsClient, bigqueryResultDirectoryUrl);
+                log.info("Initiating transfer");
+                gcsDirGzipInputStream.transferTo(s3UploadStream);
+                log.debug("Closing GCS input stream");
+                gcsDirGzipInputStream.close();
+                log.debug("Closing S3 output stream");
+                s3UploadStream.close();
+                log.debug("Finished transfer from GCS to S3");
+                List<String> bigqueryColumns = bigQueryClient.getTableColumns(sourceTableName);
+                String importedBigqueryTableName = "bigquery_import_" + bigqueryOutputId;
+                log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
+                athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory, bigqueryColumns);
+                log.info("Finished creating table: " + importedBigqueryTableName);
+                swarmTableIdentifier.databaseType = destinationDatabaseType;
+                swarmTableIdentifier.databaseName = destinationDataset;
+                swarmTableIdentifier.tableName = importedBigqueryTableName;
+                swarmTableIdentifier.size = bigqueryResultSize;
+                swarmTableIdentifier.storageUrl = s3BigQueryImportDirectory;
+            }
+        } else {
+            throw new IllegalArgumentException("Unrecognized value for destinationDatabaseType: " + destinationDatabaseType);
+        }
+
+        return swarmTableIdentifier;
+    }
+
+    private SwarmTableIdentifier getAnnotation(
+            String sourceDatabaseType,
+            Optional<String> destinationDatabaseType,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            String rsid
+    ) throws IOException, InterruptedException {
+        String sourceDatabaseName = "swarm";
+        String sourceTableName;
+        if (sourceDatabaseType.equals("athena")) {
+            sourceTableName = athenaAnnotationTable;
+        } else if (sourceDatabaseType.equals("bigquery")) {
+            sourceTableName = bigqueryAnnotationTable;
+        } else {
+            throw new ValidationException("Unknown sourceDatabaseType: " + sourceDatabaseType);
+        }
+
+        SwarmTableIdentifier swarmTableIdentifier = queryTableByVariantCoordinates(
+                sourceDatabaseType,
+                sourceDatabaseName,
+                sourceTableName,
+                destinationDatabaseType.isPresent() ?
+                        destinationDatabaseType.get() :
+                        sourceDatabaseType,
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                rsid);
+        log.info("Finished call to queryTableByVariantCoordinates for annotation");
+        return swarmTableIdentifier;
+    }
+
+    /*private SwarmTableIdentifier getAnnotationOld(
+            String sourceDatabaseType,
+            Optional<String> destinationDatabaseType,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            String rsid
+    ) throws IOException, InterruptedException {
+        VariantQuery athenaVariantQuery = new VariantQuery();
+        VariantQuery bigqueryVariantQuery = new VariantQuery();
+        boolean returnResults = false;
+        try {
+            if (!StringUtils.isEmpty(positionRange)) {
+                if (positionRange.equalsIgnoreCase("true")) {
+                    log.debug("Using positions as a range");
+                    athenaVariantQuery.setUsePositionAsRange(true);
+                    bigqueryVariantQuery.setUsePositionAsRange(true);
+                } else if (positionRange.equalsIgnoreCase("false")) {
+                    athenaVariantQuery.setUsePositionAsRange(false);
+                    bigqueryVariantQuery.setUsePositionAsRange(false);
+                } else {
+                    throw new ValidationException("Invalid param for position_range, must be true or false");
+                }
+            }
+            if (!StringUtils.isEmpty(sourceDatabaseType)) {
+                validateCloudParam(sourceDatabaseType);
+            }
+            if (!StringUtils.isEmpty(referenceNameParam)) {
+                validateReferenceName(referenceNameParam);
+                athenaVariantQuery.setReferenceName(referenceNameParam);
+                bigqueryVariantQuery.setReferenceName(referenceNameParam);
+            }
+            if (!StringUtils.isEmpty(startPositionParam)) {
+                Long startPosition = validateLongString(startPositionParam);
+                athenaVariantQuery.setStartPosition(startPosition);
+                bigqueryVariantQuery.setStartPosition(startPosition);
+            }
+            if (!StringUtils.isEmpty(endPositionParam)) {
+                Long endPosition = validateLongString(endPositionParam);
+                athenaVariantQuery.setEndPosition(endPosition);
+                bigqueryVariantQuery.setEndPosition(endPosition);
+            }
+            if (!StringUtils.isEmpty(referenceBasesParam)) {
+                validateBasesString(referenceBasesParam);
+                athenaVariantQuery.setReferenceBases(referenceBasesParam);
+                bigqueryVariantQuery.setReferenceBases(referenceBasesParam);
+            }
+            if (!StringUtils.isEmpty(alternateBasesParam)) {
+                validateBasesString(alternateBasesParam);
+                athenaVariantQuery.setAlternateBases(alternateBasesParam);
+                bigqueryVariantQuery.setAlternateBases(alternateBasesParam);
+            }
+            if (!StringUtils.isEmpty(rsid)) {
+                athenaVariantQuery.setRsid(rsid);
+                bigqueryVariantQuery.setRsid(rsid);
+            }
+        } catch (ValidationException e) {
+            throw e;
+        }
+
+        athenaVariantQuery.setTableIdentifier(athenaAnnotationTable);
+        bigqueryVariantQuery.setTableIdentifier(bigqueryAnnotationTable);
+
+        boolean forceDestinationBigquery = false;
+        boolean forceDestinationAthena = false;
+        if (destinationDatabaseType.isPresent()) {
+            log.info("Forcing destination to " + destinationDatabaseType.get());
+            if (destinationDatabaseType.get().equals("athena")) {
+                forceDestinationAthena = true;
+            } else if (destinationDatabaseType.get().equals("bigquery")) {
+                forceDestinationBigquery = true;
+            } else {
+                throw new ValidationException("Destination database type must be one of {athena, bigquery}");
+            }
+        }
+
+        String nonce = randomAlphaNumStringOfLength(12);
+        String athenaDestinationDataset = "swarm";
+        String athenaDestinationTable = "annotation_query_" + nonce;
+        boolean athenaDeleteResultTable = false;
+        String bigqueryDestinationDataset = athenaDestinationDataset;
+        String bigqueryDestinationTable = athenaDestinationTable;
+        boolean bigqueryDeleteResultTable = false;
+
+        // This is an annotation query but executeVariantQuery includes all columns
+        Callable<S3ObjectId> athenaCallable = new Callable<S3ObjectId>() {
+            @Override
+            public S3ObjectId call() throws Exception {
+                S3ObjectId objectId = getAthenaClient().executeVariantQuery(
+                        athenaVariantQuery,
+                        Optional.of(athenaDestinationDataset),
+                        Optional.of(athenaDestinationTable),
+                        Optional.of(athenaDeleteResultTable));
+                log.info("Finished athena executeVariantQuery");
+                return objectId;
+            }
+        };
+        Callable<BlobId> bigqueryCallable = new Callable<BlobId>() {
+            @Override
+            public BlobId call() throws Exception {
+                BlobId blobId = getBigQueryClient().executeVariantQuery(
+                        bigqueryVariantQuery,
+                        Optional.of(bigqueryDestinationDataset),
+                        Optional.of(bigqueryDestinationTable),
+                        Optional.of(bigqueryDeleteResultTable));
+                log.info("Finished bigquery executeVariantQuery");
+                return blobId;
+            }
+        };
+
+        ExecutorService executorService = Executors.newFixedThreadPool(2);
+
+        boolean doBigquery = false, doAthena = false, doAll = false;
+        if (sourceDatabaseType.equals("athena") || sourceDatabaseType.equals("all")) {
+            doAthena = true;
+        }
+        if (sourceDatabaseType.equals("bigquery") || sourceDatabaseType.equals("all")) {
+            doBigquery = true;
+        }
+        if (sourceDatabaseType.equals("all") || (doBigquery && doAthena)) {
+            doAll = true;
+        }
+
+        Future<S3ObjectId> athenaFuture = null;
+        if (doAthena) {
+            log.info("Submitting athena query");
+            athenaFuture = executorService.submit(athenaCallable);
+        }
+        Future<BlobId> bigqueryFuture = null;
+        if (doBigquery) {
+            log.info("Submitting bigquery query");
+            bigqueryFuture = executorService.submit(bigqueryCallable);
+        }
+
+        S3ObjectId athenaResultLocation = null;
+        BlobId bigqueryResultLocation = null;
+
+        log.debug("Shutting down executor service");
+        executorService.shutdown();
+        try {
+            long execTimeoutSeconds = 60 * 3;
+            log.info("Waiting " + execTimeoutSeconds + " seconds for query threads to complete");
+            executorService.awaitTermination(execTimeoutSeconds, TimeUnit.SECONDS);
+            log.info("Successfully shut down executor service");
+        } catch (InterruptedException e) {
+            throw e;
+        }
+
+        log.debug("Getting query result locations");
+        try {
+            long getTimeoutSeconds = 60 * 10; // 10 minutes
+            if (doAthena) {
+                athenaResultLocation = athenaFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+                log.info("Got athena result location");
+            }
+            if (doBigquery) {
+                bigqueryResultLocation = bigqueryFuture.get(getTimeoutSeconds, TimeUnit.SECONDS);
+                log.info("Got bigquery result location");
+            }
+        } catch (ExecutionException | InterruptedException | TimeoutException e) {
+            e.printStackTrace();
+            throw new RuntimeException("Failed to retrieve query result location");
+        }
+
+        String athenaResultDirectoryUrl = null, bigqueryResultDirectoryUrl = null;
+        long athenaResultSize = -1, bigqueryResultSize = -1;
+
+        if (doAthena) {
+            athenaResultDirectoryUrl = s3Client.s3ObjectIdToString(athenaResultLocation);
+            athenaResultSize = s3Client.getDirectorySize(athenaResultDirectoryUrl);
+            log.info("athena result size: " + athenaResultSize);
+        }
+        if (doBigquery) {
+            bigqueryResultDirectoryUrl = gcsClient.blobIdToString(bigqueryResultLocation);
+            bigqueryResultSize = gcsClient.getDirectorySize(bigqueryResultDirectoryUrl);
+            log.info("bigquery result size: " + bigqueryResultSize);
+        }
+
+//        Map<String,Map<String,List<String>>> superPopulationSamples =
+//                getSuperPopulationSamples(Optional.empty());
+
+        boolean resultsInBigQuery = false, resultsInAthena = false;
+        String bigqueryResultsTableFullName = null,
+                athenaResultsTableFullName = null;
+        SwarmTableIdentifier swarmTableIdentifier = new SwarmTableIdentifier();
+
+        if (athenaResultSize < bigqueryResultSize || forceDestinationBigquery) {
             log.info("Performing rest of computation in BigQuery");
             String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
             String gcsAthenaImportDirectory = pathJoin(
@@ -1007,51 +1636,16 @@ public class Controller {
                     " to table name safe: " + tableNameSafeAthenaOutputId);
             String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
             log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
+
+            // Select the VCF columns and the sample columns for half2
+            //List<String> athenaColumns = athenaClient.getTableColumns(athenaDestinationTable);
+            List<String> athenaColumns = athenaClient.getTableColumns(athenaDestinationTable);
             Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
-                    importedAthenaTableName, gcsAthenaImportDirectory);
+                    importedAthenaTableName, gcsAthenaImportDirectory, athenaColumns);
             log.info("Finished creating table: " + importedAthenaTableName);
 
-            // join the tables together
-//            String mergeSql = "select\n" +
-//                    "  a.reference_name, \n" +
-//                    "  a.start_position,\n" +
-//                    "  a.end_position,\n" +
-//                    "  a.reference_bases,\n" +
-//                    "  a.alternate_bases,\n" +
-//                    "  (\n" +
-//                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
-//                    "     / \n" +
-//                    "    (\n" +
-//                    "      (sum(coalesce(cast(a.minor_af as float64), 0)) \n" +
-//                    "       + sum(coalesce(cast(b.minor_af as float64), 0))\n" +
-//                    "       * \n" +
-//                    "      (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)))" +
-//                    "    )\n" +
-//                    "   ) as minor_af,\n" +
-//                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
-//                    "from \n" +
-//                    "  swarm.%s b\n" +
-//                    "full outer join\n" +
-//                    "  swarm.%s a\n" +
-//                    "  on a.reference_name = b.reference_name\n" +
-//                    "  and a.start_position = b.start_position\n" +
-//                    "  and a.end_position = b.end_position\n" +
-//                    "  and a.reference_bases = b.reference_bases\n" +
-//                    "  and a.alternate_bases = b.alternate_bases\n" +
-//                    "group by a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases";
-            //mergeSql = String.format(mergeSql, bigqueryDestinationTable, importedAthenaTableName);
-            String mergeSql = "select\n" +
-                    "  *\n" +
-                    "from swarm.@bigqueryTable a\n" +
-                    "join swarm.@athenaTable b\n" +
-                    "  on a.reference_name = b.reference_name\n" +
-                    "  and a.start_position = b.start_position\n" +
-                    "  and a.end_position = b.end_position\n" +
-                    "  and a.reference_bases = b.reference_bases\n" +
-                    "  and a.alternate_bases = b.alternate_bases";
-            // first placeholder is bigquery tablename, second is athena tablename
-            mergeSql = mergeSql.replace("@bigqueryTable", bigqueryDestinationTable);
-            mergeSql = mergeSql.replace("@athenaTable", importedAthenaTableName);
+            String mergeSql = bigQueryClient.getMergedVcfSelect(
+                    bigqueryDestinationTable, "a", importedAthenaTableName, "b");
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     bigqueryDestinationTable, importedAthenaTableName));
@@ -1064,13 +1658,11 @@ public class Controller {
             log.info("Writing response headers");
 
             String bigqueryDestinationTableQualified = String.format("%s.%s.%s",
-                bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
-            //response.setHeader("X-Swarm-Result-Table", bigqueryDestinationTableQualified);
+                    bigQueryClient.getProjectName(), bigqueryDestinationDataset, bigqueryDestinationTable);
             swarmTableIdentifier.databaseType = "bigquery";
             swarmTableIdentifier.databaseName = bigQueryClient.getDatasetName();
             swarmTableIdentifier.tableName = bigqueryDestinationTable;
             log.info("Deleting merged table using table result");
-            //bigQueryClient.deleteTableFromTableResult(tr);
             return swarmTableIdentifier;
         } else {
             log.info("Performing rest of computation in Athena");
@@ -1093,56 +1685,22 @@ public class Controller {
             s3UploadStream.close();
             log.debug("Finished transfer from GCS to S3");
             // create the table from the file uploaded
+            // Include the VCF columns and sample columns from half1
+            List<String> bigqueryColumns = bigQueryClient.getTableColumns(bigqueryDestinationTable);
+
             String importedBigqueryTableName = "bigquery_import_" + bigqueryOutputId;
             log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
-            athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory);
+            athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory, bigqueryColumns);
             log.info("Finished creating table: " + importedBigqueryTableName);
 
             // join the tables together
-//            String mergeSql = "select\n" +
-//                    "  a.reference_name, \n" +
-//                    "  a.start_position,\n" +
-//                    "  a.end_position,\n" +
-//                    "  a.reference_bases,\n" +
-//                    "  a.alternate_bases,\n" +
-//                    "  (\n" +
-//                    "    (sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))) \n" +
-//                    "     / \n" +
-//                    "    (\n" +
-//                    "      (sum(coalesce(cast(a.minor_af as double), 0)) \n" +
-//                    "       + sum(coalesce(cast(b.minor_af as double), 0)))\n" +
-//                    "       * \n" +
-//                    "      (\n" +
-//                    "        sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0))\n" +
-//                    "      )\n" +
-//                    "    )\n" +
-//                    "   ) as minor_af,\n" +
-//                    "  sum(coalesce(a.allele_count, 0)) + sum(coalesce(b.allele_count, 0)) as allele_count\n" +
-//                    "from \n" +
-//                    "  swarm.%s a\n" +
-//                    "full outer join\n" +
-//                    "  swarm.%s b\n" +
-//                    "  on a.reference_name = b.reference_name\n" +
-//                    "  and a.start_position = b.start_position\n" +
-//                    "  and a.end_position = b.end_position\n" +
-//                    "  and a.reference_bases = b.reference_bases\n" +
-//                    "  and a.alternate_bases = b.alternate_bases\n" +
-//                    "group by\n" +
-//                    "(a.reference_name, a.start_position, a.end_position, a.reference_bases, a.alternate_bases)";
-//            // 1st placeholder is athena table name, second is tablename from imported bigquery table
-//            mergeSql = String.format(mergeSql, athenaDestinationTable, importedBigqueryTableName);
-            String mergeSql = "select\n" +
-                    "  *\n" +
-                    "from swarm.@athenaTable a\n" +
-                    "join swarm.@bigqueryTable b\n" +
-                    "  on a.reference_name = b.reference_name\n" +
-                    "  and a.start_position = b.start_position\n" +
-                    "  and a.end_position = b.end_position\n" +
-                    "  and a.reference_bases = b.reference_bases\n" +
-                    "  and a.alternate_bases = b.alternate_bases";
-            // first placeholder is bigquery tablename, second is athena tablename
-            mergeSql = mergeSql.replace("@bigqueryTable", athenaDestinationTable);
-            mergeSql = mergeSql.replace("@athenaTable", importedBigqueryTableName);
+            String mergedTableName = "merged_" + nonce;
+            String mergeSql = athenaClient.getMergedVcfSelect(
+                    athenaDestinationTable, "a", importedBigqueryTableName, "b");
+            mergeSql = "create table "
+                    + quoteAthenaTableIdentifier(athenaDestinationDataset + "." + mergedTableName)
+                    //+ String.format("`%s`.`%s`", athenaDestinationDataset, mergedTableName)
+                    + " as \n" + mergeSql;
             log.info(String.format(
                     "Merging tables %s and %s and returning results",
                     athenaDestinationTable, importedBigqueryTableName));
@@ -1154,133 +1712,433 @@ public class Controller {
             com.amazonaws.services.athena.model.ResultSet rs = queryResultsResult.getResultSet();
             swarmTableIdentifier.databaseType = "athena";
             swarmTableIdentifier.databaseName = athenaDestinationDataset;
-            swarmTableIdentifier.tableName = athenaDestinationTable;
+            swarmTableIdentifier.tableName = mergedTableName;
             return swarmTableIdentifier;
         }
     }
+    */
 
     /**
      * Use Case 4: annotation
      */
-    @RequestMapping(value = "/annotate/{gene_label}", method = {RequestMethod.GET})
+    @RequestMapping(value = "/annotate/", method = {RequestMethod.GET})
     public void executeAnnotate(
-            @PathVariable(required = false, name = "gene_label") String geneLabel,
-            @RequestParam(required = true, name = "sourceCloud") String sourceCloudParam,
-            @RequestParam(required = true, name = "tableName") String tableName,
-            @RequestParam(required = true, name = "destinationTableName") String destinationTableName,
-            //@RequestBody String body,
+            // Variant query parameters
+            @RequestParam(required = false, name = "reference_name") String referenceNameParam,
+            @RequestParam(required = false, name = "start_position") String startPositionParam,
+            @RequestParam(required = false, name = "end_position") String endPositionParam,
+            @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
+            @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
+            @RequestParam(required = false, name = "rsid") String rsidParam,
+            @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
+            @RequestParam(required = false, name = "gene") String geneLabel,
+            
+            // Annotation parameters
+            @RequestParam(required = true, name = "variantsDatabaseType") String variantsDatabaseType,
+            @RequestParam(required = true, name = "variantsDatabaseName") String variantsDatabaseName,
+            @RequestParam(required = false /*TODO*/, name = "variantsTable") String variantsTableName,
+            @RequestParam(required = true, name = "annotationDatabaseType") String annotationDatabaseType,
+            @RequestParam(required = true, name = "annotationDatabaseName") String annotationDatabaseName,
+            @RequestParam(required = false /*TODO*/, name = "annotationTable") String annotationTableName,
+            @RequestParam(required = false, name = "destinationDatabaseType") String destinationDatabaseType,
+            @RequestParam(required = true, name = "return_results", defaultValue = "true") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
     ) throws InterruptedException, IOException, TimeoutException, ExecutionException, SQLException {
-        disallowQuoteSemicolonSpace(tableName);
-//        final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
-//        byte[] bytes = Files.readAllBytes(Paths.get(MAIN_ROOT + "sql/annotation.sql"));
-//        String sql = new String(bytes, StandardCharsets.US_ASCII);
+        boolean returnResults = false;
+        if (!StringUtils.isEmpty(returnResultsParam)) {
+            if (returnResultsParam.equals("true")) {
+                returnResults = true;
+            } else if (!returnResultsParam.equals("false")) {
+                throw new ValidationException("Invalid param for return_results, must be true or false");
+            }
+        }
+        boolean forceDestinationAthena = false;
+        boolean forceDestinationBigquery = false;
+        if (!StringUtils.isEmpty(destinationDatabaseType)) {
+            if (destinationDatabaseType.equals("athena")) {
+                forceDestinationAthena = true;
+            } else if (destinationDatabaseType.equals("bigquery")) {
+                forceDestinationBigquery = true;
+            } else {
+                throw new ValidationException("Unknown destinationDatabaseType: " + destinationDatabaseType);
+            }
+            log.info("Forcing annotation results to: " + destinationDatabaseType);
+        }
+
+        if (!variantsDatabaseName.equals("swarm") || !annotationDatabaseName.equals("swarm")) {
+            throw new ValidationException("Currently only supporting dataset/databases named 'swarm'");
+        }
+
+        // validate geneLabel
+        if (!StringUtils.isEmpty(geneLabel)) {
+            if (!StringUtils.isAllEmpty(referenceNameParam, startPositionParam, endPositionParam,
+                    referenceBasesParam, alternateBasesParam, rsidParam)) {
+                throw new ValidationException("Cannot mix gene, rsid, and location based query parameters");
+            }
+        }
+        // validate rsid
+        if (!StringUtils.isEmpty(rsidParam)) {
+            if (!StringUtils.isAllEmpty(referenceNameParam, startPositionParam, endPositionParam,
+                    referenceBasesParam, alternateBasesParam, geneLabel)) {
+                throw new ValidationException("Cannot mix gene, rsid, and location based query parameters");
+            }
+        }
+        // validate database types
+        List<String> acceptedDatabaseTypes = Arrays.asList("bigquery", "athena");
+        if (!acceptedDatabaseTypes.containsAll(
+                Arrays.asList(variantsDatabaseType, annotationDatabaseType, destinationDatabaseType))) {
+            throw new ValidationException(
+                    "variantsDatabaseType, annotationDatabaseType, destinationDatabaseType must be one of {athena, bigquery}");
+        }
+
+        log.warn("Temporarily disallowing variant and annotation from same database");
+        if (variantsDatabaseType.equals(annotationDatabaseType)) {
+            throw new ValidationException("Temporarily disallowing variants and annotations from same database");
+        }
+
+        if (!StringUtils.isAllEmpty(variantsTableName, annotationTableName)) {
+            log.warn("Specifying variant and annotation table not yet supported, see getVariants and getAnnotation");
+        }
+
+        String variantsDestinationDatabaseType;
+        if (!StringUtils.isEmpty(destinationDatabaseType)) {
+            variantsDestinationDatabaseType = destinationDatabaseType;
+        }
+
+        disallowQuoteSemicolonSpace(variantsTableName);
         String sql = loadSqlFile("annotation.sql");
 
-        SwarmTableIdentifier swarmTableIdentifier;
+        SwarmTableIdentifier variantTableIdentifier;
+        SwarmTableIdentifier annotationTableIdentifier;
 
         if (!StringUtils.isEmpty(geneLabel)) {
-            if (!StringUtils.isEmpty(sourceCloudParam) || !StringUtils.isEmpty(tableName)) {
-                throw new IllegalArgumentException("Cannot provide source table on gene based query");
-            }
+            log.debug("Performing gene based query");
             GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
             if (geneCoordinate == null) {
-                throw new IllegalArgumentException("Gene could not be found in coordinates table");
+                throw new IllegalArgumentException("Gene could not be found in coordinates table " + geneLabel);
             }
-            //getVariantsByGene(geneLabel);
-            swarmTableIdentifier = this.getVariants(
-                    sourceCloudParam,
+            variantTableIdentifier = getVariants(
+                    variantsDatabaseType,
+                    Optional.of(destinationDatabaseType),
                     geneCoordinate.referenceName,
                     geneCoordinate.startPosition.toString(),
                     geneCoordinate.endPosition.toString(),
                     null,
                     null,
-                    "true");
-
-        }
-
-        if (sourceCloudParam.equals("athena")) {
-            // This is just to create a new csv.gz dump of the input table
-            String inputQuery = "select * from " + quoteAthenaTableIdentifier(tableName);
-            S3ObjectId inputTable = athenaClient.executeQueryToObjectId(inputQuery);
-            String tableDataUrl = String.format(
-                    "s3://%s/%s", inputTable.getBucket(), inputTable.getKey());
-            log.info("Executed query and got results object location: " + tableDataUrl);
-
-            // move the results to bigquery
-            S3DirectoryGzipConcatInputStream s3Stream =
-                    new S3DirectoryGzipConcatInputStream(s3Client, tableDataUrl);
-            String gcsImportDirectory = pathJoin(
-                    bigQueryClient.getStorageBucket(),
-                    "annotation-imports");
-            String nonce = randomAlphaNumStringOfLength(12);
-            gcsImportDirectory = pathJoin(gcsImportDirectory, nonce);
-            String gcsImportFileUrl = pathJoin(gcsImportDirectory, "import.csv");
-            GCSUploadStream gcsUploadStream =
-                    new GCSUploadStream(gcsClient, gcsImportFileUrl);
-            log.info("Transferring contents of " + tableDataUrl + " to " + gcsImportFileUrl);
-            s3Stream.transferTo(gcsUploadStream);
-            log.info("Finished transferring files in " + tableDataUrl + " to " + gcsImportFileUrl);
-
-
-            // create a table from the directory where the Athena results were transferred to
-            String importedAthenaTableName = "athena_import_" + nonce;
-            //String headerLine = gcsClient.getFirstLineOfFile(gcsImportFileUrl);
-            Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
-                    importedAthenaTableName, gcsImportDirectory);
-            log.info("Created table from athena import: " + importedAthenaTableName);
-
-
-            // run the annotation SQL on the imported table
-            //String formattedTableName = quoteAthenaTableIdentifier(tableName);
-            String formattedTableName = "`" + tableName + "`";
-            String query = String.format(sql, formattedTableName);
-            // ensure the destination table has a dataset, default to bigquery default dataset if not provided
-            TableId destinationTableId = null;
-            String[] terms = destinationTableName.split("\\.");
-            if (terms.length == 1) {
-                destinationTableName = String.format("%s.%s.%s",
-                        bigQueryClient.getProjectName(), bigQueryClient.getDatasetName(), terms[0]);
-                //destinationTableId = TableId.of(bigQueryClient.getDatasetName(), destinationTableName);
-            } else if (terms.length == 2) {
-                destinationTableName = String.format("%s.%s.%s",
-                        bigQueryClient.getProjectName(), terms[0], terms[1]);
-                //destinationTableId = TableId.of(terms[0], terms[1]);
-            } else if (terms.length == 3) {
-                destinationTableName = String.format("%s.%s.%s",
-                        terms[0], terms[1], terms[2]);
-                //destinationTableId = TableId.of(terms[0], terms[1], terms[2]);
-            } else {
-                throw new IllegalArgumentException("Unknown format for destination table name: " + destinationTableName);
-            }
-
-            // make this a CTAS query
-            log.info("Creating variant annotation table " + destinationTableName +
-                    " from variant table " + tableName);
-            query = String.format(
-                    "create table `%s` as (%s)",
-                    destinationTableName, query
-            );
-            // TODO
-            //TableResult tableResult = bigQueryClient.runSimpleQueryNoDestination(query);
-            TableResult tableResult = bigQueryClient.runSimpleQueryNoDestination(query);
-            //GetQueryResultsResult getQueryResultsResult = athenaClient.executeQueryToResultSet(query);
-            response.setStatus(200);
-            response.setHeader("X-Swarm-Result-Cloud", "bigquery");
-            response.setHeader("X-Swarm-Result-Table",
-                    String.format("%s.%s.%s",
-                            bigQueryClient.getProjectName(),
-                            bigQueryClient.getDatasetName(),
-                            destinationTableName));
-
-            // log transfer size
-
-        } else if (sourceCloudParam.equals("bigquery")) {
-            //bigQueryClient.runSimpleQuery(body);
-            throw new UnsupportedOperationException("Cannot annotate tables in BigQuery yet");
+                    "true",
+                    null);
+            annotationTableIdentifier = getAnnotation(
+                    annotationDatabaseType,
+                    Optional.of(destinationDatabaseType),
+                    geneCoordinate.referenceName,
+                    geneCoordinate.startPosition.toString(),
+                    geneCoordinate.endPosition.toString(),
+                    null,
+                    null,
+                    "true",
+                    null);
+        } else if (!StringUtils.isEmpty(rsidParam)) {
+            log.debug("Performing rsid based query");
+            variantTableIdentifier = getVariants(
+                    variantsDatabaseType,
+                    Optional.of(destinationDatabaseType),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    positionRange,
+                    rsidParam);
+            annotationTableIdentifier = getAnnotation(
+                    variantsDatabaseType,
+                    Optional.of(destinationDatabaseType),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    positionRange,
+                    rsidParam);
         } else {
-            throw new ValidationException("Unrecognized cloud param: " + sourceCloudParam);
+            log.debug("Performing coordinates based query");
+            // TODO limit filter broadness to reduce read/transfer sizes
+            variantTableIdentifier = getVariants(
+                    variantsDatabaseType,
+                    Optional.of(destinationDatabaseType),
+                    referenceNameParam,
+                    startPositionParam,
+                    endPositionParam,
+                    referenceBasesParam,
+                    alternateBasesParam,
+                    positionRange,
+                    null);
+            annotationTableIdentifier = getAnnotation(
+                    variantsDatabaseType,
+                    Optional.of(destinationDatabaseType),
+                    referenceNameParam,
+                    startPositionParam,
+                    endPositionParam,
+                    referenceBasesParam,
+                    alternateBasesParam,
+                    positionRange,
+                    null);
         }
+
+        List<String> variantColumns = null;
+        List<String> annotationColumns = null;
+        log.info("Checking whether a filtered table needs to be copied to another platform");
+        if (variantTableIdentifier.databaseType.equals("athena")
+                && annotationTableIdentifier.databaseType.equals("bigquery")) {
+            // variants are in athena, annotation is in bigquery
+            if (destinationDatabaseType.equals("athena")) {
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in athena");
+                // Copy annotation results from bigquery to athena
+                String bigqueryResultDirectoryUrl = annotationTableIdentifier.storageUrl;
+                String athenaOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
+                String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
+                String s3BigQueryImportDirectory = pathJoin(
+                        athenaClient.getStorageBucket(),
+                        "bigquery-imports/" + bigqueryOutputId + "/");
+                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+                log.info("Copying bigquery output id: " + bigqueryOutputId
+                        + " from " + bigqueryResultDirectoryUrl
+                        + " to " + s3BigQueryImportFile);
+                S3UploadStream s3UploadStream = new S3UploadStream(s3Client, s3BigQueryImportFile);
+                GCSDirectoryConcatInputStream gcsDirGzipInputStream =
+                        new GCSDirectoryConcatInputStream(gcsClient, bigqueryResultDirectoryUrl);
+                log.info("Initiating transfer");
+                gcsDirGzipInputStream.transferTo(s3UploadStream);
+                log.debug("Closing GCS input stream");
+                gcsDirGzipInputStream.close();
+                log.debug("Closing S3 output stream");
+                s3UploadStream.close();
+                log.debug("Finished transfer from GCS to S3");
+                // create the table from the file uploaded
+                // Include the VCF columns and sample columns from half1
+                annotationColumns = bigQueryClient.getTableColumns(annotationTableIdentifier.tableName);
+                String importedBigqueryTableName = "bigquery_import_" + bigqueryOutputId;
+                log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
+                athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory, annotationColumns);
+                log.info("Finished creating table: " + importedBigqueryTableName);
+                annotationTableIdentifier.databaseType = destinationDatabaseType;
+                annotationTableIdentifier.tableName = importedBigqueryTableName;
+            } else if (annotationTableIdentifier.databaseType.equals("bigquery")) {
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
+                // Copy variant results from bigquery to athena
+                String athenaResultDirectoryUrl = variantTableIdentifier.storageUrl;
+                String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
+                String gcsAthenaImportDirectory = pathJoin(
+                        bigQueryClient.getStorageBucket(),
+                        "athena-imports/" + athenaOutputId);
+                String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.parquet");
+                log.info("Copying athena output id: " + athenaOutputId
+                        + " from " + athenaResultDirectoryUrl
+                        + " to " + gcsAthenaImportFile);
+                GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsAthenaImportFile);
+                S3DirectoryConcatInputStream s3DirGzipInputStream =
+                        new S3DirectoryConcatInputStream(s3Client, athenaResultDirectoryUrl);
+                log.info("Initiating transfer");
+                s3DirGzipInputStream.transferTo(gcsUploadStream);
+                log.debug("CLosing S3 input stream");
+                s3DirGzipInputStream.close();
+                log.debug("Closing GCS output stream");
+                gcsUploadStream.close();
+                log.debug("Finished transfer from S3 to GCS");
+                // create the table from the file uploaded
+                String tableNameSafeAthenaOutputId = athenaOutputId.replaceAll("-", "");
+                log.debug("Converted athena output id from " + athenaOutputId +
+                        " to table name safe: " + tableNameSafeAthenaOutputId);
+                String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
+                log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
+
+                // Select the VCF columns and the sample columns for half2
+                variantColumns = athenaClient.getTableColumns(variantTableIdentifier.tableName);
+                Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
+                        importedAthenaTableName, Arrays.asList(gcsAthenaImportFile), variantColumns);
+                log.info("Finished creating table: " + importedAthenaTableName);
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
+                variantTableIdentifier.databaseType = destinationDatabaseType;
+                variantTableIdentifier.tableName = importedAthenaTableName;
+            }
+        } else if (variantTableIdentifier.databaseType.equals("bigquery")
+                && annotationTableIdentifier.databaseType.equals("athena")) {
+            // TODO This may be redundant because getVariants will already perform the transfer
+            if (destinationDatabaseType.equals("bigquery")) {
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
+                // Copy variant results from bigquery to athena
+                String athenaResultDirectoryUrl = variantTableIdentifier.storageUrl;
+                String athenaOutputId = getLastNonEmptySegmentOfPath(athenaResultDirectoryUrl);
+                String gcsAthenaImportDirectory = pathJoin(
+                        bigQueryClient.getStorageBucket(),
+                        "athena-imports/" + athenaOutputId);
+                String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.parquet");
+                log.info("Copying athena output id: " + athenaOutputId
+                        + " from " + athenaResultDirectoryUrl
+                        + " to " + gcsAthenaImportFile);
+                GCSUploadStream gcsUploadStream = new GCSUploadStream(gcsClient, gcsAthenaImportFile);
+                S3DirectoryConcatInputStream s3DirGzipInputStream =
+                        new S3DirectoryConcatInputStream(s3Client, athenaResultDirectoryUrl);
+                log.info("Initiating transfer");
+                s3DirGzipInputStream.transferTo(gcsUploadStream);
+                log.debug("CLosing S3 input stream");
+                s3DirGzipInputStream.close();
+                log.debug("Closing GCS output stream");
+                gcsUploadStream.close();
+                log.debug("Finished transfer from S3 to GCS");
+                // create the table from the file uploaded
+                String tableNameSafeAthenaOutputId = athenaOutputId.replaceAll("-", "");
+                log.debug("Converted athena output id from " + athenaOutputId +
+                        " to table name safe: " + tableNameSafeAthenaOutputId);
+                String importedAthenaTableName = "athena_import_" + tableNameSafeAthenaOutputId;
+                log.info("Creating table " + importedAthenaTableName + " from directory " + gcsAthenaImportDirectory);
+
+                // Select the VCF columns and the sample columns for half2
+                variantColumns = athenaClient.getTableColumns(variantTableIdentifier.tableName);
+                Table importedAthenaTable = bigQueryClient.createVariantTableFromGcs(
+                        importedAthenaTableName, Arrays.asList(gcsAthenaImportFile), variantColumns);
+                log.info("Finished creating table: " + importedAthenaTableName);
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
+                variantTableIdentifier.databaseType = destinationDatabaseType;
+                variantTableIdentifier.tableName = importedAthenaTableName;
+            } else if (annotationTableIdentifier.databaseType.equals("athena")) {
+                log.info("Variants are in athena, annotation is in bigquery, user requested results in athena");
+                // Copy annotation results from bigquery to athena
+                String bigqueryResultDirectoryUrl = variantTableIdentifier.storageUrl;
+                String bigqueryOutputId = getLastNonEmptySegmentOfPath(bigqueryResultDirectoryUrl);
+                String s3BigQueryImportDirectory = pathJoin(
+                        athenaClient.getStorageBucket(),
+                        "bigquery-imports/" + bigqueryOutputId + "/");
+                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+                log.info("Copying bigquery output id: " + bigqueryOutputId
+                        + " from " + bigqueryResultDirectoryUrl
+                        + " to " + s3BigQueryImportFile);
+                S3UploadStream s3UploadStream = new S3UploadStream(s3Client, s3BigQueryImportFile);
+                GCSDirectoryConcatInputStream gcsDirGzipInputStream =
+                        new GCSDirectoryConcatInputStream(gcsClient, bigqueryResultDirectoryUrl);
+                log.info("Initiating transfer");
+                gcsDirGzipInputStream.transferTo(s3UploadStream);
+                log.debug("Closing GCS input stream");
+                gcsDirGzipInputStream.close();
+                log.debug("Closing S3 output stream");
+                s3UploadStream.close();
+                log.debug("Finished transfer from GCS to S3");
+                // create the table from the file uploaded
+                // Include the VCF columns and sample columns from half1
+                annotationColumns = bigQueryClient.getTableColumns(annotationTableIdentifier.tableName);
+                String importedBigqueryTableName = "bigquery_import_" + bigqueryOutputId;
+                log.info("Creating table " + importedBigqueryTableName + " from file " + s3BigQueryImportDirectory);
+                athenaClient.createVariantTableFromS3(importedBigqueryTableName, s3BigQueryImportDirectory, annotationColumns);
+                log.info("Finished creating table: " + importedBigqueryTableName);
+                annotationTableIdentifier.databaseType = destinationDatabaseType;
+                annotationTableIdentifier.tableName = importedBigqueryTableName;
+            }
+        } /*else {
+            throw new IllegalArgumentException("Annotating a table within the same database source is not implemented yet");
+        }*/
+
+        if (annotationColumns == null) {
+            log.info("Looking up annotation table schema");
+            if (annotationTableIdentifier.databaseType.equals("athena")) {
+                annotationColumns = athenaClient.getTableColumns(annotationTableIdentifier.tableName);
+            } else if (annotationTableIdentifier.databaseType.equals("bigquery")) {
+                annotationColumns = bigQueryClient.getTableColumns(annotationTableIdentifier.tableName);
+            } else {
+                throw new IllegalStateException("Unknown annotation databaseType");
+            }
+        }
+        if (variantColumns == null) {
+            log.info("Looking up variant table schema");
+            if (variantTableIdentifier.databaseType.equals("athena")) {
+                variantColumns = athenaClient.getTableColumns(variantTableIdentifier.tableName);
+            } else if (variantTableIdentifier.databaseType.equals("bigquery")) {
+                variantColumns = bigQueryClient.getTableColumns(variantTableIdentifier.tableName);
+            } else {
+                throw new IllegalStateException("Unknown annotation databaseType");
+            }
+        }
+
+
+        log.info(String.format("Performing annotation in %s", destinationDatabaseType));
+//        String mergeSql =
+//                "select @mergedColumnList "
+//                        + "from @variantTable @variantAlias "
+//                        + "full outer join @annotationTable @annotationAlias";
+        String variantAlias = "a", annotationAlias = "b";
+//        String variantPrefix = variantAlias + ".", annotationPrefix = annotationAlias + ".";
+//        List<String> variantColumnsWithPrefixes = variantColumns.stream()
+//                .map(col -> variantPrefix + col)
+//                .collect(Collectors.toList());
+//        List<String> annotationColumnsWithPrefixes = annotationColumns.stream()
+//                .map(col -> annotationPrefix + col)
+//                .collect(Collectors.toList());
+//        List<String> mergedColumns = StringUtils.mergeColumnListsIgnorePrefixes(
+//                variantColumnsWithPrefixes, variantPrefix,
+//                annotationColumnsWithPrefixes, annotationPrefix,
+//                true);
+//        String mergedColumnListString = String.join(", ", mergedColumns);
+        // TODO maybe change to StringBuilder, col list could be large, resulting in large mem copies here
+        // Replace col list, and aliases. Table name formats depend on database, so do those later
+//        mergeSql = mergeSql.replace("@variantAlias", variantAlias);
+//        mergeSql = mergeSql.replace("@annotationAlias", annotationAlias);
+//        mergeSql = mergeSql.replace("@mergedColumnList", mergedColumnListString);
+
+        String destTable = "swarm_annotation_" + randomAlphaNumStringOfLength(10);
+        log.info("Creating annotation table " + destTable);
+
+        response.setHeader("Content-Type", "application/json");
+        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        jsonWriter.beginObject();
+
+        if (destinationDatabaseType.equals("athena")) {
+            String mergedVcfSelect = athenaClient.getMergedVcfSelect(
+                    variantTableIdentifier.tableName, variantAlias,
+                    annotationTableIdentifier.tableName, annotationAlias,
+                    DatabaseClientInterface.JoinType.LEFT_JOIN
+            );
+//            mergeSql = mergeSql.replace("@mergedColumnList", mergedVcfSelect);
+            log.info(String.format("Annotating variant table %s with annotation table %s in athena",
+                    variantTableIdentifier.tableName, annotationTableIdentifier.tableName));
+//            mergeSql = mergeSql.replace("@variantTable",
+//                    quoteAthenaTableIdentifier(variantTableIdentifier.databaseName+"."+variantTableIdentifier.tableName));
+//            mergeSql = mergeSql.replace("@annotationTable",
+//                    quoteAthenaTableIdentifier(annotationTableIdentifier.databaseName+"."+annotationTableIdentifier.tableName));
+            log.debug("Adding CTAS to annotation sql");
+            String location = pathJoin(athenaClient.getStorageBucket(), destTable) + "/";
+            String ctas = "create table " + String.format("\"%s\".\"%s\"`", annotationTableIdentifier.databaseName, destTable) + "\n"
+                    + "with(external_location=" + location + ")\n"
+                    + "as\n"
+                    + mergedVcfSelect;
+            log.info("Running annotation merge query in athena");
+            athenaClient.executeQueryToResultSet(ctas);
+            log.info("Running serialize of " + destTable);
+            athenaClient.serializeTableToJSON(destTable, jsonWriter, true);
+        } else if (destinationDatabaseType.equals("bigquery")) {
+            String mergedVcfSelect = bigQueryClient.getMergedVcfSelect(
+                    variantTableIdentifier.tableName, variantAlias,
+                    annotationTableIdentifier.tableName, annotationAlias,
+                    DatabaseClientInterface.JoinType.LEFT_JOIN
+            );
+//            mergeSql = mergeSql.replace("@mergedColumnList", mergedVcfSelect);
+            log.info(String.format("Annotating variant table %s with annotation table %s in bigquery",
+                    variantTableIdentifier.tableName, annotationTableIdentifier.tableName));
+//            mergeSql = mergeSql.replace("@variantTable",
+//                    String.format("`%s.%s`",
+//                            variantTableIdentifier.databaseName,
+//                            variantTableIdentifier.tableName));
+//            mergeSql = mergeSql.replace("@annotationTable",
+//                    String.format("`%s.%s`",
+//                            annotationTableIdentifier.databaseName,
+//                            annotationTableIdentifier.tableName));
+            log.info("Running annotation merge query in bigquery");
+            TableResult tr = bigQueryClient.runSimpleQuery(
+                    mergedVcfSelect,
+                    Optional.of(TableId.of(annotationTableIdentifier.databaseName, destTable)));
+            log.info("Running serialize of " + destTable);
+            bigQueryClient.serializeTableToJson(destTable, jsonWriter, true);
+        } else {
+            throw new IllegalStateException("Unknown error occurred");
+        }
+        jsonWriter.endObject();
     }
 
 

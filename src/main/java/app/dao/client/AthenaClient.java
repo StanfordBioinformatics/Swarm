@@ -3,11 +3,8 @@ package app.dao.client;
 import app.AppLogging;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
-import com.amazonaws.SdkClientException;
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.PropertiesFileCredentialsProvider;
-import com.amazonaws.protocol.MarshallingInfo;
-import com.amazonaws.protocol.ProtocolMarshaller;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.athena.AmazonAthena;
@@ -17,21 +14,18 @@ import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.services.s3.model.S3ObjectId;
 import com.google.gson.stream.JsonWriter;
 import com.simba.athena.jdbc.Driver;
-import org.aopalliance.intercept.MethodInterceptor;
 import org.apache.logging.log4j.Logger;
 
 import javax.annotation.Nullable;
-import javax.json.Json;
 import javax.validation.ValidationException;
 import javax.validation.constraints.NotNull;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.Writer;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
-import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import static app.dao.client.StringUtils.*;
 
@@ -64,6 +58,26 @@ public class AthenaClient {
             return value;
         }
     }
+
+    final static List<String> VCF_JOIN_COLUMNS = Arrays.asList(
+        "reference_name",
+        "start_position",
+        "end_position",
+        "reference_bases",
+        "alternate_bases");
+
+    final static String[] vcfColumns = new String[]{
+            "reference_name",
+            "start_position",
+            "end_position",
+            "id",
+            "reference_bases",
+            "alternate_bases",
+            "qual",
+            "filter",
+            "info",
+            "format"
+    };
 
     //private HashMap<String,String> executionIdToLocation = new HashMap<>();
     private HashMap<String,String> tableNameToLocation = new HashMap<>();
@@ -103,6 +117,10 @@ public class AthenaClient {
         this.athena = athenaClientBuilder.build();
 
         this.databaseName = databaseName;
+    }
+
+    public AmazonAthena getAthena() {
+        return this.athena;
     }
 
     private Connection getConnection() throws SQLException {
@@ -190,7 +208,7 @@ public class AthenaClient {
         variantQuery.setStartPosition(startPosition);
         variantQuery.setEndPosition(endPosition);
         // use start and end as inclusive range
-        variantQuery.setUsePositionAsRange();
+        variantQuery.setUsePositionAsRange(true);
         variantQuery.setReferenceBases(referenceBases);
         variantQuery.setAlternateBases(alternateBases);
         variantQuery.setMinorAF(minorAF);
@@ -278,7 +296,6 @@ public class AthenaClient {
         S3PathParser parser = new S3PathParser(tableFilesUrl);
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
-
 
     private String prepareSqlString(String s) {
         return "'" + escapeQuotes(s) + "'";
@@ -393,20 +410,35 @@ public class AthenaClient {
     }
 
 
-    public void createVariantTableFromS3(String shortTableName, String s3DirectoryUrl) {
+    /**
+     * Creates a table with all string columns
+     * @param shortTableName
+     * @param s3DirectoryUrl
+     * @param sourceFieldNames
+     */
+    public void createVariantTableFromS3(String shortTableName, String s3DirectoryUrl, List<String> sourceFieldNames) {
         log.debug("createVariantTableFromS3(" + shortTableName + ", " + s3DirectoryUrl + ")");
         disallowQuoteSemicolonSpace(shortTableName);
         disallowQuoteSemicolonSpace(s3DirectoryUrl);
         String fullTableName = this.databaseName + "." + shortTableName;
         String query = "";
         List<String> fields = new ArrayList<>();
-        fields.add("`reference_name` string");
-        fields.add("`start_position` bigint");
-        fields.add("`end_position` bigint");
-        fields.add("`reference_bases` string");
-        fields.add("`alternate_bases` string");
-        fields.add("`minor_af` double");
-        fields.add("`allele_count` bigint");
+        List<String> allowedIntegerColumns = Arrays.asList("start_position", "end_position");
+        for (String s : sourceFieldNames) {
+            if (allowedIntegerColumns.contains(s)) {
+                fields.add(String.format("`%s` bigint", s));
+            } else {
+                fields.add(String.format("`%s` string", s));
+            }
+        }
+//        List<String> fields = new ArrayList<>();
+//        fields.add("`reference_name` string");
+//        fields.add("`start_position` bigint");
+//        fields.add("`end_position` bigint");
+//        fields.add("`reference_bases` string");
+//        fields.add("`alternate_bases` string");
+//        fields.add("`minor_af` double");
+//        fields.add("`allele_count` bigint");
         String fieldString = String.join(",\n", fields);
 
         query += "CREATE EXTERNAL TABLE IF NOT EXISTS " +
@@ -416,7 +448,8 @@ public class AthenaClient {
                 "WITH SERDEPROPERTIES (\n" +
                 "  'serialization.format' = ',',\n" +
                 "  'field.delim' = ','\n" +
-                ") LOCATION '" + s3DirectoryUrl + "'\n" +
+                ") " +
+                "LOCATION '" + s3DirectoryUrl + "'\n" +
                 "TBLPROPERTIES ('has_encrypted_data'='false');";
         StartQueryExecutionRequest startRequest = new StartQueryExecutionRequest()
                 .withResultConfiguration(
@@ -541,6 +574,7 @@ public class AthenaClient {
      */
     public GetQueryResultsResult executeQueryToResultSet(String query) {
         log.debug("executeQueryToResultSet: " + query);
+
         ResultConfiguration resultConfiguration = new ResultConfiguration()
                 .withOutputLocation(getOutputLocation());
         StartQueryExecutionRequest startQueryExecutionRequest = new StartQueryExecutionRequest();
@@ -557,9 +591,27 @@ public class AthenaClient {
 
         // get results
         GetQueryResultsResult getQueryResultsResult = athena.getQueryResults(getQueryResultsRequest);
+
+        // Write statistics to log
+        GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
+                .withQueryExecutionId(executionId);
+        GetQueryExecutionResult getQueryExecutionResult = athena.getQueryExecution(getQueryExecutionRequest);
+        QueryExecutionStatistics queryExecutionStatistics = getQueryExecutionResult.getQueryExecution().getStatistics();
+        log.info("Athena bytes scanned: " + queryExecutionStatistics.getDataScannedInBytes().toString());
         //return getQueryResultsResult.getResultSet();
+
         return getQueryResultsResult;
         //return rs;
+    }
+
+    @Deprecated
+    public void createTableAs(String query, String destinationTableName) {
+//        throw new NotImplementedException("AthenaClient.createTableAs not yet implemented");
+
+        query = "create table "
+                + String.format("`%s`.`%s`", this.databaseName, destinationTableName)
+                + " with(external_location=" + pathJoin(getOutputLocation(), destinationTableName) + ")"
+                + " as " + query;
     }
 
     public S3ObjectId executeQueryToObjectId(@NotNull String query) {
@@ -587,19 +639,139 @@ public class AthenaClient {
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
-    public void serializeMergedVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
-        serializeMergeVcfTablesToJson(tableName, null, jsonWriter);
+    public List<String> getTableColumns(String tableName) {
+        String sql = "DESCRIBE " + String.format("`%s`.`%s`", databaseName, tableName) + ";";
+        GetQueryResultsResult getQueryResultsResult = executeQueryToResultSet(sql);
+        ResultSet rs = getQueryResultsResult.getResultSet();
+        List<String> columns = new ArrayList<>();
+        // DESCRIBE format:
+        // <colname> <type>
+        // ....
+        // <empty row>
+        // <partition information>
+        for (Row row : rs.getRows()) {
+            List<Datum> data = row.getData();
+            if (data.size() > 1) {
+                throw new RuntimeException("DESCRIBE row data had more than one entry: [" + row.toString() + "]");
+            }
+            String val = data.get(0).getVarCharValue();
+            String[] vals = val.split("\\s+");
+            if (vals.length == 0) {
+                // end of column data
+                break;
+            }
+            if (vals.length != 2) {
+                throw new RuntimeException("DESCRIBE datum didn't have 2 terms: ["+ Arrays.toString(vals) +"]");
+            }
+            String colName = vals[0];
+            //String type = vals[1];
+            columns.add(colName);
+        }
+        return columns;
     }
 
-    public void serializeMergeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter) throws IOException {
-        String query;
-        if (tableName2 != null) {
-            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
-                    this.databaseName, tableName1, this.databaseName, tableName2);
-        } else {
-            query = String.format("select * from \"%s\".\"%s\"",
-                    this.databaseName, tableName1);
+    /**
+     * Merges the provided schemas and removes duplicated column names
+     * @param tableNameA schema A to merge with B
+     * @param tableAliasA alias to use for table A
+     * @param tableNameB schema B to merge with A
+     * @param tableAliasB alias to use for table B
+     * @return list of the merged column names, no duplicates
+     */
+    private List<String> mergeSchemaColumns(
+            String tableNameA, String tableAliasA,
+            String tableNameB, String tableAliasB) {
+        String tablePrefixA = tableAliasA + ".";
+        String tablePrefixB = tableAliasB + ".";
+
+        List<String> listA = getTableColumns(tableNameA);
+        List<String> listB = getTableColumns(tableNameB);
+
+        List<String> listAWithPrefixes = listA
+                .stream()
+                .map(String::toLowerCase)
+                .map(name -> tablePrefixA + name)
+                .collect(Collectors.toList());
+        List<String> listBWithPrefixes = listB
+                .stream()
+                .map(String::toLowerCase)
+                .map(name -> tablePrefixB + name)
+                .collect(Collectors.toList());
+
+        return StringUtils.mergeColumnListsIgnorePrefixes(
+                listAWithPrefixes, tablePrefixA,
+                listBWithPrefixes, tablePrefixB,
+                true);
+    }
+
+    public void mergeAndSerializeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
+            throws IOException, InterruptedException {
+        mergeAndSerializeVcfTablesToJson(tableName1, "a", tableName2, "b", jsonWriter);
+    }
+
+    public String getMergedVcfSelect(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias) {
+        return getMergedVcfSelect(tableName1, table1Alias,
+                tableName2, table2Alias,
+                DatabaseClientInterface.JoinType.FULL_JOIN);
+    }
+
+    public String getMergedVcfSelect(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias,
+            DatabaseClientInterface.JoinType joinType) {
+        List<String> mergedColumnsNames = mergeSchemaColumns(tableName1, table1Alias, tableName2, table2Alias);
+        String sql =
+                "select @mergedColumnsNames " +
+                        "from @dataset.@tableName1 as @table1Alias " +
+                        joinType.getDefaultString() +
+                        " @dataset.@tableName2 as @table2Alias";
+        sql = sql.replace("@mergedColumnsNames", String.join(", ", mergedColumnsNames));
+        sql = sql.replace("@dataset", this.databaseName);
+        sql = sql.replace("@dataset", this.databaseName);
+        sql = sql.replace("@tableName1", tableName1);
+        sql = sql.replace("@table1Alias", table1Alias);
+        sql = sql.replace("@tableName2", tableName2);
+        sql = sql.replace("@table2Alias", table2Alias);
+
+        // Add on clauses
+        sql += " on ";
+        boolean firstOn = true;
+        for (String s : VCF_JOIN_COLUMNS) {
+            if (!firstOn) {
+                sql += " and ";
+                firstOn = false;
+            }
+            firstOn = false;
+            sql += String.format(" %s.%s = %s.%s ",
+                    table1Alias, s, table2Alias, s);
         }
+
+        return sql;
+    }
+
+    // TODO
+    public void mergeAndSerializeVcfTablesToJson(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias,
+            JsonWriter jsonWriter) throws IOException, InterruptedException {
+        //List<String> mergedColumnsNames = mergeSchemaColumns(schema1, table1Alias, schema2, table2Alias);
+        String sql = getMergedVcfSelect(tableName1, table1Alias, tableName2, table2Alias);
+        serializeVcfQueryToJson(sql, jsonWriter);
+    }
+
+    /**
+     * Serializes a vcf-conformant query to json, combining the samples to allele counts and splitting alternates into
+     * separate records.
+     * @param query must conform to expected vcf table columns, with all other columns being assumed to be samples in the form
+     *              "[0-INTMAX]+|[0-INTMAX]+"
+     * @param jsonWriter writer to serialize the response into
+     * @throws InterruptedException if interrupted
+     * @throws IOException if error in writing
+     */
+    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter)
+            throws InterruptedException, IOException {
         GetQueryResultsResult getQueryResultsResult = this.executeQueryToResultSet(query);
         ResultSet rs = getQueryResultsResult.getResultSet();
         List<Row> rows = rs.getRows();
@@ -609,19 +781,8 @@ public class AthenaClient {
             columnNames.add(datum.getVarCharValue());
         }
 
-        // Any columns not in this list are assumed to be sample columns
-        String[] vcfColumns = new String[]{
-                "reference_name",
-                "start_position",
-                "end_position",
-                "id",
-                "reference_bases",
-                "alternate_bases",
-                "qual",
-                "filter",
-                "info",
-                "format"
-        };
+        // Any columns not in vcfColumnsList are assumed to be sample columns
+
         List<String> vcfColumnsList = Arrays.asList(vcfColumns);
         List<String> sampleColumnsList = new ArrayList<>();
         for (String s : columnNames) {
@@ -660,13 +821,10 @@ public class AthenaClient {
                 String sampleValue = getColVal.apply(sampleColName);
                 if (sampleValue != null && sampleValue.length() > 0) {
                     String[] sampleGTs = sampleValue.split("\\|");
-//                    log.debug("Inspecting sample values " + Arrays.toString(sampleGTs));
                     for (String gtString : sampleGTs) {
                         Long gtLong = StringUtils.toLongNullable(gtString);
-                        if (gtLong != null) {
+                        if (gtLong != null) { // ignore errors
                             int gtInt = gtLong.intValue();
-//                            log.debug(String.format("Incrementing count for allele %s by 1, new count: %d",
-//                                    gtString, alleleCounts[gtInt]));
                             alleleCounts[gtInt] = alleleCounts[gtInt] + 1;
                         }
                     }

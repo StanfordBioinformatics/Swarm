@@ -168,10 +168,15 @@ public class VariantQuery {
      * endPositionOperator to LESS_OR_EQUAL in order to treat
      * the start and end as an inclusive range.
      */
-    public void setUsePositionAsRange() {
-        this.usePositionAsRange = true;
-        setStartPositionComparisonOperator(NumericValueComparisonOperator.GREATER_OR_EQUAL);
-        setEndPositionComparisonOperator(NumericValueComparisonOperator.LESS_OR_EQUAL);
+    public void setUsePositionAsRange(boolean newValue) {
+        this.usePositionAsRange = newValue;
+        if (newValue) {
+            setStartPositionComparisonOperator(NumericValueComparisonOperator.GREATER_OR_EQUAL);
+            setEndPositionComparisonOperator(NumericValueComparisonOperator.LESS_OR_EQUAL);
+        } else {
+            setStartPositionComparisonOperator(NumericValueComparisonOperator.EQUAL);
+            setEndPositionComparisonOperator(NumericValueComparisonOperator.EQUAL);
+        }
     }
 
     public boolean getUsePositionAsRange() {

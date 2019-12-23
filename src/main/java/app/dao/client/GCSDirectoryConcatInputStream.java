@@ -1,7 +1,6 @@
 package app.dao.client;
 
 import app.AppLogging;
-import com.amazonaws.services.s3.model.S3ObjectId;
 import com.google.cloud.storage.BlobId;
 import org.apache.logging.log4j.Logger;
 
@@ -17,8 +16,8 @@ import java.util.zip.GZIPInputStream;
  * <br>
  * Uses host temp directory, and files saved there are deleted when the stream is closed.
  */
-public class GCSDirectoryGzipConcatInputStream extends InputStream {
-    private Logger log = AppLogging.getLogger(GCSDirectoryGzipConcatInputStream.class);
+public class GCSDirectoryConcatInputStream extends InputStream {
+    private Logger log = AppLogging.getLogger(GCSDirectoryConcatInputStream.class);
 
     private Path outFilePath;
     private FileInputStream outFileInputStream;
@@ -33,28 +32,37 @@ public class GCSDirectoryGzipConcatInputStream extends InputStream {
      * @param client
      * @param gcsDirectoryUrl
      */
-    public GCSDirectoryGzipConcatInputStream(GCSClient client, String gcsDirectoryUrl) throws IOException {
+    public GCSDirectoryConcatInputStream(GCSClient client, String gcsDirectoryUrl, boolean isGzip) throws IOException {
         outFilePath = Files.createTempFile(
                 "bigquery-table-",
                 ".tmp");
         log.info("Using temp file: " + outFilePath.toString());
         OutputStream fileOutputStream = new FileOutputStream(outFilePath.toFile());
 
-        // Download all directory contents (still gzipped)
+        // Download all directory contents (potentially gzipped)
         List<BlobId> directoryObjects = client.listDirectory(gcsDirectoryUrl);
         for (BlobId objectId : directoryObjects) {
             InputStream is = client.getInputStream(objectId);
-            GZIPInputStream gunzipStream = new GZIPInputStream(is);
-            gunzipStream.transferTo(fileOutputStream);
-            gunzipStream.close(); // theoretically closes 'is' as well
+            if (isGzip) {
+                GZIPInputStream gunzipStream = new GZIPInputStream(is);
+                gunzipStream.transferTo(fileOutputStream);
+                gunzipStream.close(); // theoretically closes 'is' as well
+            } else {
+                is.transferTo(fileOutputStream);
+            }
+
             is.close();
             String gcsPath = "gs://" + objectId.getBucket() + "/" + objectId.getName();
-            log.debug("Downloaded and decompressed GCS file: " + gcsPath);
+            log.debug("Downloaded and GCS file: " + gcsPath);
         }
         fileOutputStream.flush();
         fileOutputStream.close();
 
         outFileInputStream = new FileInputStream(outFilePath.toFile());
+    }
+
+    public GCSDirectoryConcatInputStream(GCSClient client, String gcsDirectoryUrl) throws IOException {
+        this(client, gcsDirectoryUrl, false);
     }
 
     @Override

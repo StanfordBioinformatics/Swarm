@@ -6,6 +6,24 @@ import java.util.Map;
 
 public interface DatabaseClientInterface {
 
+    enum JoinType {
+        LEFT_JOIN("left join"),
+        RIGHT_JOIN("right join"),
+        FULL_JOIN("full join"),
+        INNER_JOIN("inner join"),
+        CROSS_JOIN("cross join");
+
+        private String defaultString;
+
+        JoinType(String defaultString) {
+            this.defaultString = defaultString;
+        }
+
+        String getDefaultString() {
+            return defaultString;
+        }
+    }
+
     /**
      * Warning, highly susceptible to out of memory errors, as it loads result set into local memory.
      * @param query

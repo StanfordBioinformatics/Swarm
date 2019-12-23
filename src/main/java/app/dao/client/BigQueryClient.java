@@ -4,7 +4,6 @@ import app.AppLogging;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
 import com.google.api.client.util.ArrayMap;
-import com.google.api.services.bigquery.model.TableReference;
 import com.google.auth.oauth2.ServiceAccountCredentials;
 import com.google.cloud.RetryOption;
 import com.google.cloud.bigquery.*;
@@ -14,7 +13,6 @@ import org.apache.logging.log4j.Logger;
 import org.threeten.bp.Duration;
 
 import javax.annotation.Nullable;
-import javax.json.Json;
 import javax.validation.constraints.NotNull;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -22,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static app.dao.client.StringUtils.*;
 
@@ -39,12 +38,35 @@ public class BigQueryClient implements DatabaseClientInterface {
     private String projectName;
     private String datasetName;
 
+    // Any columns not in this list are assumed to be sample columns
+    private final String[] vcfColumns = new String[]{
+            "reference_name",
+            "start_position",
+            "end_position",
+            "id",
+            "reference_bases",
+            "alternate_bases",
+            "qual",
+            "filter",
+            "info",
+            "format"
+    };
+    private final List<String> vcfColumnsList = Arrays.asList(vcfColumns);
+
+    final static List<String> VCF_JOIN_COLUMNS = Arrays.asList(
+            "reference_name",
+            "start_position",
+            "end_position",
+            "reference_bases",
+            "alternate_bases");
+
     public BigQueryClient(
             String datasetName,
             String credentialFilePath) {
         BigQueryOptions.Builder bqb = BigQueryOptions.newBuilder();
         try {
-            bqb.setCredentials(ServiceAccountCredentials.fromStream(new FileInputStream(credentialFilePath)));
+            ServiceAccountCredentials creds = ServiceAccountCredentials.fromStream(new FileInputStream(credentialFilePath));
+            bqb.setCredentials(creds);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -60,6 +82,10 @@ public class BigQueryClient implements DatabaseClientInterface {
                     "No dataset with name [%s] exists in project [%s]",
                     datasetName, projectName));
         }
+    }
+
+    public BigQuery getBigQuery() {
+        return this.bigquery;
     }
 
     public String getProjectName() {
@@ -107,7 +133,7 @@ public class BigQueryClient implements DatabaseClientInterface {
         variantQuery.setStartPosition(startPosition);
         variantQuery.setEndPosition(endPosition);
         // use start and end as inclusive range
-        variantQuery.setUsePositionAsRange();
+        variantQuery.setUsePositionAsRange(true);
         variantQuery.setReferenceBases(referenceBases);
         variantQuery.setAlternateBases(alternateBases);
         variantQuery.setMinorAF(minorAF);
@@ -203,8 +229,7 @@ public class BigQueryClient implements DatabaseClientInterface {
         }
 
         // return a BlobId for the directory in GCS where the result files are
-        BlobId blobId = BlobId.of(parser.bucket, exportDirectory);
-        return blobId;
+        return BlobId.of(parser.bucket, exportDirectory);
     }
 
     public String getStorageBucket() {
@@ -306,20 +331,137 @@ public class BigQueryClient implements DatabaseClientInterface {
         return fvl.get("ct").getLongValue();
     }
 
-    public void serializeMergedVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
-        serializeMergeVcfTablesToJson(tableName, null, jsonWriter);
+    public List<String> getTableColumns(String tableName) {
+        Table table = bigquery.getTable(TableId.of(datasetName, tableName));
+        Schema schema = table.getDefinition().getSchema();
+        return schema.getFields()
+                .stream()
+                .map(Field::getName)
+                .collect(Collectors.toList());
     }
 
-    public void serializeMergeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
-            throws InterruptedException, IOException {
-        String query;
-        if (tableName2 != null) {
-            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
-                    this.datasetName, tableName1, this.datasetName, tableName2);
-        } else {
-            query = String.format("select * from \"%s\".\"%s\"",
-                    this.datasetName, tableName1);
+    /**
+     * Merges the provided schemas and removes duplicated column names
+     * @param schemaA schema A to merge with B
+     * @param tableAliasA alias to use for table A
+     * @param schemaB schema B to merge with A
+     * @param tableAliasB alias to use for table B
+     * @return list of the merged column names, no duplicates
+     */
+    private List<String> mergeSchemaColumns(
+            Schema schemaA, String tableAliasA,
+            Schema schemaB, String tableAliasB) {
+        String tablePrefixA = tableAliasA + ".";
+        String tablePrefixB = tableAliasB + ".";
+
+        List<String> listA = schemaA.getFields()
+                .stream()
+                .map(Field::getName)
+                .map(String::toLowerCase)
+                .map(name -> tablePrefixA + name)
+                .collect(Collectors.toList());
+        List<String> listB = schemaB.getFields()
+                .stream()
+                .map(Field::getName)
+                .map(String::toLowerCase)
+                .map(name -> tablePrefixB + name)
+                .collect(Collectors.toList());
+        List<String> merged = StringUtils.mergeColumnListsIgnorePrefixes(
+                listA, tablePrefixA,
+                listB, tablePrefixB,
+                true);
+        return merged;
+    }
+
+    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter)
+            throws IOException, InterruptedException {
+        String sql = "select * from `" + this.datasetName + "." + tableName + "`";
+        serializeVcfQueryToJson(sql, jsonWriter);
+    }
+
+    public void mergeAndSerializeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
+            throws IOException, InterruptedException {
+        mergeAndSerializeVcfTablesToJson(tableName1, "a", tableName2, "b", jsonWriter);
+    }
+
+    public String getMergedVcfSelect(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias) {
+        return getMergedVcfSelect(tableName1, table1Alias,
+                tableName2, table2Alias,
+                JoinType.FULL_JOIN);
+    }
+
+    public String getMergedVcfSelect(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias,
+            JoinType joinType) {
+        // merge the schemas, removing duplicated column names
+        Table table1 = this.bigquery.getTable(TableId.of(this.datasetName, tableName1));
+        Schema schema1 = table1.getDefinition().getSchema();
+        Table table2 = this.bigquery.getTable(TableId.of(this.datasetName, tableName2));
+        Schema schema2 = table2.getDefinition().getSchema();
+        // merge the schemas, removing duplicated column names
+        List<String> mergedColumnsNames = mergeSchemaColumns(schema1, table1Alias, schema2, table2Alias);
+        String sql =
+                "select @mergedColumnsNames " +
+                        "from @dataset.@tableName1 as @table1Alias " +
+                        joinType.getDefaultString() +
+                        " @dataset.@tableName2 as @table2Alias";
+        sql = sql.replace("@mergedColumnsNames", String.join(", ", mergedColumnsNames));
+        sql = sql.replace("@dataset", this.datasetName);
+        sql = sql.replace("@dataset", this.datasetName);
+        sql = sql.replace("@tableName1", tableName1);
+        sql = sql.replace("@table1Alias", table1Alias);
+        sql = sql.replace("@tableName2", tableName2);
+        sql = sql.replace("@table2Alias", table2Alias);
+
+        // Add on clauses
+        sql += " on ";
+        boolean firstOn = true;
+        for (String s : VCF_JOIN_COLUMNS) {
+            if (!firstOn) {
+                sql += " and ";
+                firstOn = false;
+            }
+            firstOn = false;
+            sql += String.format(" %s.%s = %s.%s ",
+                    table1Alias, s, table2Alias, s);
         }
+        return sql;
+    }
+
+    // TODO
+    public void mergeAndSerializeVcfTablesToJson(
+            String tableName1, String table1Alias,
+            String tableName2, String table2Alias,
+            JsonWriter jsonWriter) throws IOException, InterruptedException {
+        String sql = getMergedVcfSelect(tableName1, table1Alias, tableName2, table2Alias);
+        serializeVcfQueryToJson(sql, jsonWriter);
+    }
+
+    /**
+     * Serializes a vcf-conformant query to json, combining the samples to allele counts and splitting alternates into
+     * separate records.
+     * @param query must conform to expected vcf table columns, with all other columns being assumed to be samples in the form
+     *              "[0-INTMAX]+|[0-INTMAX]+"
+     * @param jsonWriter writer to serialize the response into
+     * @throws InterruptedException if interrupted
+     * @throws IOException if error in writing
+     */
+    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter)
+            throws InterruptedException, IOException {
+//        Table table = this.bigquery.getTable(TableId.of(this.datasetName, tableName1));
+//        table.getDefinition().getSchema();
+//        String query;
+//        if (tableName2 != null) {
+//            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
+//                    this.datasetName, tableName1, this.datasetName, tableName2);
+//        } else {
+//            query = String.format("select * from \"%s\".\"%s\"",
+//                    this.datasetName, tableName1);
+//        }
+
         TableResult tr = this.runSimpleQuery(query);
         Schema schema = tr.getSchema();
         FieldList fieldList = schema.getFields();
@@ -329,20 +471,7 @@ public class BigQueryClient implements DatabaseClientInterface {
         }
         Long totalRows = tr.getTotalRows();
 
-        // Any columns not in this list are assumed to be sample columns
-        String[] vcfColumns = new String[]{
-                "reference_name",
-                "start_position",
-                "end_position",
-                "id",
-                "reference_bases",
-                "alternate_bases",
-                "qual",
-                "filter",
-                "info",
-                "format"
-        };
-        List<String> vcfColumnsList = Arrays.asList(vcfColumns);
+        // Sample columns are anything not included in VCF column names
         List<String> sampleColumnsList = new ArrayList<>();
         for (String s : columnNames) {
             if (!StringUtils.listContainsIgnoreCase(vcfColumnsList, s)) {
@@ -363,7 +492,6 @@ public class BigQueryClient implements DatabaseClientInterface {
         jsonWriter.name("data").beginArray();
 
         for (FieldValueList fieldValueList : tr.iterateAll()) {
-            //List<String> rowData = new ArrayList<>();
             String[] alternateBases = fieldValueList.get("alternate_bases").getStringValue().split(",");
             int altCount = alternateBases.length;
 
@@ -376,13 +504,10 @@ public class BigQueryClient implements DatabaseClientInterface {
                 String sampleValue = fieldValueList.get(sampleColName).getStringValue();
                 if (sampleValue != null && sampleValue.length() > 0) {
                     String[] sampleGTs = sampleValue.split("\\|");
-//                    log.debug("Inspecting sample values " + Arrays.toString(sampleGTs));
                     for (String gtString : sampleGTs) {
                         Long gtLong = StringUtils.toLongNullable(gtString);
-                        if (gtLong != null) {
+                        if (gtLong != null) { // ignore errors
                             int gtInt = gtLong.intValue();
-//                            log.debug(String.format("Incrementing count for allele %s by 1, new count: %d",
-//                                    gtString, alleleCounts[gtInt]));
                             alleleCounts[gtInt] = alleleCounts[gtInt] + 1;
                         }
                     }
@@ -412,22 +537,6 @@ public class BigQueryClient implements DatabaseClientInterface {
                 double af = (double)alleleCounts[i+1] / (double)sampleColumnsList.size();
                 jsonWriter.value(af);
                 jsonWriter.endArray();
-//                for (String vcfColName : vcfColumns) {
-//                    if (!columnsToWrite.contains(vcfColName)) {
-//                        continue;
-//                    }
-//                    StandardSQLTypeName columnType = schema.getFields().get(vcfColName).getType().getStandardType();
-//                    FieldValue fieldValue = fieldValueList.get(vcfColName);
-//                    if (columnType.equals(StandardSQLTypeName.INT64)) {
-//                        jsonWriter.value(fieldValue.getLongValue());
-//                    } else if (columnType.equals(StandardSQLTypeName.FLOAT64)) {
-//                        jsonWriter.value(fieldValue.getDoubleValue());
-//                    } else if (columnType.equals(StandardSQLTypeName.NUMERIC)) {
-//                        jsonWriter.value(fieldValue.getNumericValue());
-//                    } else {
-//                        jsonWriter.value(fieldValue.getStringValue());
-//                    }
-//                }
             }
 
         }
@@ -438,7 +547,7 @@ public class BigQueryClient implements DatabaseClientInterface {
 
     public void serializeTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData)
             throws IOException, InterruptedException {
-        String query = String.format("select * from \"%s\".\"%s\"", this.datasetName, tableName);
+        String query = String.format("select * from `%s.%s`", this.datasetName, tableName);
         TableResult tr = this.runSimpleQuery(query);
         Schema schema = tr.getSchema();
         FieldList fieldList = schema.getFields();
@@ -470,10 +579,14 @@ public class BigQueryClient implements DatabaseClientInterface {
 
         jsonWriter.name("data").beginArray();
         for (FieldValueList fieldValueList : tr.iterateAll()) {
+            jsonWriter.beginArray();
             for (String columnName : columnNames) {
                 StandardSQLTypeName columnType = fieldList.get(columnName).getType().getStandardType();
                 FieldValue fieldValue = fieldValueList.get(columnName);
-                if (columnType.equals(StandardSQLTypeName.INT64)) {
+                if (fieldValue.isNull()) {
+                    String s = null;
+                    jsonWriter.value(s);
+                } else if (columnType.equals(StandardSQLTypeName.INT64)) {
                     jsonWriter.value(fieldValue.getLongValue());
                 } else if (columnType.equals(StandardSQLTypeName.FLOAT64)) {
                     jsonWriter.value(fieldValue.getDoubleValue());
@@ -483,10 +596,16 @@ public class BigQueryClient implements DatabaseClientInterface {
                     jsonWriter.value(fieldValue.getStringValue());
                 }
             }
+            jsonWriter.endArray();
         }
         jsonWriter.endArray();
     }
 
+    /**
+     * Not recommended, will result in very large local memory requirements for large result sets
+     * @param query query to run
+     * @return Iterable of rows, each row being a map of column names to values
+     */
     @Override
     public Iterable<Map<String,Object>> executeQuery(String query) {
         TableResult tr;
@@ -516,11 +635,7 @@ public class BigQueryClient implements DatabaseClientInterface {
             Map<String,Object> row = new ArrayMap<>();
             //Iterator<FieldValue> fieldIterator = fvl.iterator();
             // within a row, loop over fields
-            //Iterator<Field> fieldIterator = fields.iterator();
-            //while (fieldIterator.hasNext()) {
             for (String fieldName : fieldNames) {
-                //Field curField = fieldIterator.next();
-                //String fieldName = curField.getName();
                 Object fieldVal = fvl.get(fieldName).getValue();
                 //System.out.printf("Field: %s, Value: %s\n", fieldName, fieldVal);
                 row.put(fieldName, fieldVal);
@@ -532,7 +647,24 @@ public class BigQueryClient implements DatabaseClientInterface {
     }
 
     public TableResult runQueryJob(QueryJobConfiguration queryJobConfig) throws InterruptedException {
-        return bigquery.query(queryJobConfig);
+        JobId jobId = JobId.newBuilder().setRandomJob().build();
+        TableResult tr =  bigquery.query(
+                queryJobConfig,
+                jobId
+        );
+
+        Job job = bigquery.getJob(jobId);
+                //BigQuery.JobOption.fields(BigQuery.JobField.values())
+
+        com.google.cloud.Service<BigQueryOptions> service = (com.google.cloud.Service<BigQueryOptions>) bigquery;
+
+        JobStatistics jobStatistics = job.getStatistics();
+        // Get the query-specific statistics
+        JobStatistics.QueryStatistics queryStatistics = (JobStatistics.QueryStatistics) jobStatistics;
+
+        log.info("Job statistics: " + queryStatistics.toString());
+        log.info("BigQuery bytes scanned: " + queryStatistics.getEstimatedBytesProcessed());
+        return tr;
     }
 
     // cache temp table names
@@ -634,27 +766,47 @@ public class BigQueryClient implements DatabaseClientInterface {
         return newTable;
     }
 
-    public Table createVariantTableFromGcs(String tableName, String gcsDirectoryUrl) {
-        gcsDirectoryUrl = ensureTrailingSlash(gcsDirectoryUrl);
-        log.debug("createVariantTableFromGcs(" + tableName + ", " + gcsDirectoryUrl + ")");
-        List<String> sourceUris = new ArrayList<>();
-        sourceUris.add(gcsDirectoryUrl);
+    public Table createVariantTableFromGcs(String tableName, List<String> sourceUris, List<String> sourceFieldNames) {
+        //gcsDirectoryUrl = ensureTrailingSlash(gcsDirectoryUrl);
+        log.debug("createVariantTableFromGcs(" + tableName + ", " + String.join(",", sourceUris) + ")");
+//        List<String> sourceUris = new ArrayList<>();
+//        sourceUris.add(gcsDirectoryUrl);
 
-        Schema schema = Schema.of(
-                Field.newBuilder("reference_name", StandardSQLTypeName.STRING).build(),
-                Field.newBuilder("start_position", StandardSQLTypeName.INT64).build(),
-                Field.newBuilder("end_position", StandardSQLTypeName.INT64).build(),
-                Field.newBuilder("reference_bases", StandardSQLTypeName.STRING).build(),
-                Field.newBuilder("alternate_bases", StandardSQLTypeName.STRING).build(),
-                Field.newBuilder("minor_af", StandardSQLTypeName.FLOAT64).build(),
-                Field.newBuilder("allele_count", StandardSQLTypeName.INT64).build()
-        );
-        FormatOptions formatOptions = FormatOptions.csv();
+        // TODO using parquet instead of CSV, schema is built into file
+//        List<Field> fields = new ArrayList<>();
+//        List<String> allowedIntegerColumns = Arrays.asList("start_position", "end_position");
+//        for (String s : sourceFieldNames) {
+//            if (allowedIntegerColumns.contains(s)) {
+//                fields.add(Field.newBuilder(s, StandardSQLTypeName.INT64).build());
+//            } else {
+//                fields.add(Field.newBuilder(s, StandardSQLTypeName.STRING).build());
+//            }
+//        }
+//        Schema schema = Schema.of(fields);
+
+
+//        Schema schema = Schema.of(
+//                Field.newBuilder("reference_name", StandardSQLTypeName.STRING).build(),
+//                Field.newBuilder("start_position", StandardSQLTypeName.INT64).build(),
+//                Field.newBuilder("end_position", StandardSQLTypeName.INT64).build(),
+//                Field.newBuilder("reference_bases", StandardSQLTypeName.STRING).build(),
+//                Field.newBuilder("alternate_bases", StandardSQLTypeName.STRING).build(),
+//                Field.newBuilder("minor_af", StandardSQLTypeName.FLOAT64).build(),
+//                Field.newBuilder("allele_count", StandardSQLTypeName.INT64).build()
+//        );
+//        ExternalTableDefinition.Builder tableDefinitionBuilder =
+//                ExternalTableDefinition.newBuilder(sourceUris, schema, formatOptions);
+
+
+        //FormatOptions formatOptions = FormatOptions.csv();
+        FormatOptions formatOptions = FormatOptions.parquet();
         ExternalTableDefinition.Builder tableDefinitionBuilder =
-                ExternalTableDefinition.newBuilder(gcsDirectoryUrl, schema, formatOptions);
+                ExternalTableDefinition.newBuilder(sourceUris.get(0), formatOptions);
+        tableDefinitionBuilder.setSourceUris(sourceUris);
+
         ExternalTableDefinition tableDefinition = tableDefinitionBuilder.build();
         TableId tableId = TableId.of(this.datasetName, tableName);
-        log.info("Creating table " + tableName + " from gcs directory: " + gcsDirectoryUrl);
+        log.info("Creating table " + tableName + " from gcs uris: " + String.join(",", sourceUris));
         Table newTable = bigquery.create(TableInfo.newBuilder(tableId, tableDefinition).build());
         log.info("Finished creating table " + tableName);
         return newTable;
@@ -688,7 +840,7 @@ public class BigQueryClient implements DatabaseClientInterface {
                 this.datasetName + "." + variantQuery.getTableIdentifier()
         ));
 
-        QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder("");
+        QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder(sb.toString());
 
         List<String> wheres = new ArrayList<>();
         if (variantQuery.getReferenceName() != null) {
