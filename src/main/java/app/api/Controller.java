@@ -363,17 +363,16 @@ public class Controller {
         }
 
         response.setHeader("Content-Type", "application/json");
-        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        StringWriter stringWriter = new StringWriter();
+        JsonWriter jsonWriter = new JsonWriter(stringWriter);
         jsonWriter.beginObject();
 
         if (swarmTableIdentifier.databaseType.equals("athena")) {
             //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            // TODO
             //athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
             athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
         } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
             //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            // TODO
             //bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
             bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
 
@@ -386,18 +385,10 @@ public class Controller {
         }
 
         jsonWriter.endObject();
-//
-//        this.getVariants(
-//                sourceCloud,
-//                geneCoordinate.referenceName,
-//                geneCoordinate.startPosition.toString(),
-//                geneCoordinate.endPosition.toString(),
-//                null,
-//                null,
-//                "true",
-//                "true",
-//                request,
-//                response);
+
+        String responseString = stringWriter.toString();
+        response.setContentLengthLong(responseString.length());
+        response.getWriter().write(responseString);
     }
 
     /**
@@ -746,7 +737,6 @@ public class Controller {
             }
         }
 
-
         Callable<SwarmTableIdentifier> athenaCallable = new Callable<SwarmTableIdentifier>() {
             @Override
             public SwarmTableIdentifier call() throws Exception {
@@ -781,12 +771,17 @@ public class Controller {
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         Future<SwarmTableIdentifier> athenaFuture = executorService.submit(athenaCallable);
         Future<SwarmTableIdentifier> bigqueryFuture = executorService.submit(bigqueryCallable);
-        executorService.awaitTermination(30, TimeUnit.MINUTES);
+        int waitMinutes = 30;
+        log.info("Initiating executor service shutdown and waiting " + waitMinutes + " for task completion");
         executorService.shutdown();
-
+        executorService.awaitTermination(waitMinutes, TimeUnit.MINUTES);
+        executorService.shutdown();
+        log.info("Finished shutting down executor service");
+        log.info("Getting athena future");
         SwarmTableIdentifier athenaTableIdentifier = athenaFuture.get(10, TimeUnit.MINUTES);
+        log.info("Getting bigquery future");
         SwarmTableIdentifier bigqueryTableIdentifier = bigqueryFuture.get(10, TimeUnit.MINUTES);
-
+        log.info("Finished getting future results");
 //        SwarmTableIdentifier swarmTableIdentifier = getVariants(
 //                sourceCloud,
 //                Optional.empty(),
@@ -798,7 +793,7 @@ public class Controller {
 //                positionRange,
 //                rsidParam);
 
-        log.debug("Finished getVariants call");
+        //log.debug("Finished getVariants call");
 
 //        if (athenaTableIdentifier.size < bigqueryTableIdentifier.size) {
 //            log.debug("Move bigquery to athena");
@@ -810,16 +805,20 @@ public class Controller {
 //        response.setHeader("X-Swarm-TableName", swarmTableIdentifier.tableName);
         response.setHeader("Content-Type", "application/json");
 
-        //StringWriter stringWriter = new StringWriter();
-        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        StringWriter stringWriter = new StringWriter();
+        JsonWriter jsonWriter = new JsonWriter(stringWriter);
         jsonWriter.beginObject();
 
+        log.info("Serializing athena table");
         jsonWriter.name("athena").beginObject();
         athenaClient.serializeTableToJSON(athenaTableIdentifier.tableName, jsonWriter, returnResults);
+
         jsonWriter.endObject();
 
+        log.info("Serializing bigquery table");
         jsonWriter.name("bigquery").beginObject();
-        bigQueryClient.serializeTableToJson(bigqueryTableIdentifier.tableName, jsonWriter, returnResults);
+        //bigQueryClient.serializeTableToJson(bigqueryTableIdentifier.tableName, jsonWriter, returnResults);
+        bigQueryClient.serializeVcfTableToJson(bigqueryTableIdentifier.tableName, jsonWriter);
         jsonWriter.endObject();
 
         // serialize the table into the response, in JSON format.
@@ -841,6 +840,10 @@ public class Controller {
         }
 
         jsonWriter.endObject();
+
+        String responseString = stringWriter.toString();
+        response.setContentLength(responseString.length());
+        response.getWriter().write(responseString);
     }
 
     public static class SwarmTableIdentifier {
@@ -906,7 +909,7 @@ public class Controller {
                 alternateBasesParam,
                 positionRange,
                 rsid);
-        log.info("Finished call to queryTableByVariantCoordinates for variants");
+        log.info("Finished call to queryTableByVariantCoordinates for variants from database type " + sourceDatabaseType);
         return swarmTableIdentifier;
     }
 
@@ -2086,7 +2089,8 @@ public class Controller {
         log.info("Creating annotation table " + destTable);
 
         response.setHeader("Content-Type", "application/json");
-        JsonWriter jsonWriter = new JsonWriter(response.getWriter());
+        StringWriter stringWriter = new StringWriter();
+        JsonWriter jsonWriter = new JsonWriter(stringWriter);
         jsonWriter.beginObject();
 
         if (destinationDatabaseType.equals("athena")) {
@@ -2104,8 +2108,8 @@ public class Controller {
 //                    quoteAthenaTableIdentifier(annotationTableIdentifier.databaseName+"."+annotationTableIdentifier.tableName));
             log.debug("Adding CTAS to annotation sql");
             String location = pathJoin(athenaClient.getStorageBucket(), destTable) + "/";
-            String ctas = "create table " + String.format("\"%s\".\"%s\"`", annotationTableIdentifier.databaseName, destTable) + "\n"
-                    + "with(external_location=" + location + ")\n"
+            String ctas = "create table " + String.format("\"%s\".\"%s\"", annotationTableIdentifier.databaseName, destTable) + "\n"
+                    + "with(external_location='" + location + "')\n"
                     + "as\n"
                     + mergedVcfSelect;
             log.info("Running annotation merge query in athena");
@@ -2139,6 +2143,10 @@ public class Controller {
             throw new IllegalStateException("Unknown error occurred");
         }
         jsonWriter.endObject();
+
+        String responseString = stringWriter.toString();
+        response.setContentLength(responseString.length());
+        response.getWriter().write(responseString);
     }
 
 
