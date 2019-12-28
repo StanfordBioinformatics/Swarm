@@ -737,6 +737,18 @@ public class Controller {
             }
         }
 
+        // Require some positional filter parameters
+        // Make this more intelligent
+        if (StringUtils.isEmpty(rsidParam)) {
+            if (StringUtils.isEmpty(referenceNameParam)) {
+                throw new ValidationException("Must provide a either an rsid or referenceName parameter");
+            }
+            if (StringUtils.isAnyEmpty(startPositionParam, endPositionParam)) {
+                throw new ValidationException("Must provide either a start or end position filter");
+            }
+        }
+
+
         Callable<SwarmTableIdentifier> athenaCallable = new Callable<SwarmTableIdentifier>() {
             @Override
             public SwarmTableIdentifier call() throws Exception {
@@ -782,27 +794,8 @@ public class Controller {
         log.info("Getting bigquery future");
         SwarmTableIdentifier bigqueryTableIdentifier = bigqueryFuture.get(10, TimeUnit.MINUTES);
         log.info("Finished getting future results");
-//        SwarmTableIdentifier swarmTableIdentifier = getVariants(
-//                sourceCloud,
-//                Optional.empty(),
-//                referenceNameParam,
-//                startPositionParam,
-//                endPositionParam,
-//                referenceBasesParam,
-//                alternateBasesParam,
-//                positionRange,
-//                rsidParam);
-
-        //log.debug("Finished getVariants call");
-
-//        if (athenaTableIdentifier.size < bigqueryTableIdentifier.size) {
-//            log.debug("Move bigquery to athena");
-//        }
 
         log.debug("Writing response headers");
-//        response.setHeader("X-Swarm-DatabaseType", swarmTableIdentifier.databaseType);
-//        response.setHeader("X-Swarm-DatabaseName", swarmTableIdentifier.databaseName);
-//        response.setHeader("X-Swarm-TableName", swarmTableIdentifier.tableName);
         response.setHeader("Content-Type", "application/json");
 
         StringWriter stringWriter = new StringWriter();
@@ -856,26 +849,6 @@ public class Controller {
         String storageUrl = null;
     }
 
-//    private SwarmTableIdentifier getVariants(
-//            String sourceDatabaseType,
-//            Optional<String> destinationDatabaseType,
-//            String referenceNameParam,
-//            String startPositionParam,
-//            String endPositionParam,
-//            String referenceBasesParam,
-//            String alternateBasesParam,
-//            String positionRange) throws InterruptedException, IOException {
-//        return getVariants(sourceDatabaseType,
-//                destinationDatabaseType
-//                referenceNameParam,
-//                startPositionParam,
-//                endPositionParam,
-//                referenceBasesParam,
-//                alternateBasesParam,
-//                positionRange,
-//                null);
-//    }
-
     private SwarmTableIdentifier getVariants(
             String sourceDatabaseType,
             Optional<String> destinationDatabaseType,
@@ -914,6 +887,7 @@ public class Controller {
         return swarmTableIdentifier;
     }
 
+    /*
     private SwarmTableIdentifier getVariantsOld(
             String sourceCloud,
             String referenceNameParam,
@@ -1213,8 +1187,16 @@ public class Controller {
             return swarmTableIdentifier;
         }
     }
+     */
 
-    // TODO
+    /**
+     * Queries a VCF table by given coordinate information.
+     * Table column schema must match that expected by Swarm project
+     *
+     * @return identifier of the result location of the query
+     * @throws IOException on IO error
+     * @throws InterruptedException on unexpected interruption error
+     */
     private SwarmTableIdentifier queryTableByVariantCoordinates(
             String sourceDatabaseType,
             String sourceDatabaseName, // TODO parametrize VariantQuery
@@ -1725,7 +1707,7 @@ public class Controller {
     /**
      * Use Case 4: annotation
      */
-    @RequestMapping(value = "/annotate/", method = {RequestMethod.GET})
+    @RequestMapping(value = "/annotate", method = {RequestMethod.GET})
     public void executeAnnotate(
             // Variant query parameters
             @RequestParam(required = false, name = "reference_name") String referenceNameParam,
@@ -1816,11 +1798,16 @@ public class Controller {
         SwarmTableIdentifier annotationTableIdentifier;
 
         if (!StringUtils.isEmpty(geneLabel)) {
-            log.debug("Performing gene based query");
+            log.debug("Performing gene based query for " + geneLabel);
             GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
             if (geneCoordinate == null) {
                 throw new IllegalArgumentException("Gene could not be found in coordinates table " + geneLabel);
             }
+            log.debug("Querying for variants at coordinates " +
+                    String.format("chr%s:%d-%d",
+                            geneCoordinate.referenceName,
+                            geneCoordinate.startPosition,
+                            geneCoordinate.endPosition));
             variantTableIdentifier = getVariants(
                     variantsDatabaseType,
                     Optional.of(destinationDatabaseType),
@@ -1865,6 +1852,11 @@ public class Controller {
                     rsidParam);
         } else {
             log.debug("Performing coordinates based query");
+            log.debug("Querying for variants at coordinates " +
+                    String.format("chr%s:%s-%s",
+                            referenceNameParam,
+                            startPositionParam,
+                            endPositionParam));
             // TODO limit filter broadness to reduce read/transfer sizes
             variantTableIdentifier = getVariants(
                     variantsDatabaseType,
