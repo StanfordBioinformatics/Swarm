@@ -6,7 +6,6 @@ import app.dao.query.VariantQuery;
 import app.dao.client.StringUtils;
 import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
-import com.amazonaws.services.athena.model.*;
 import com.amazonaws.services.s3.model.S3ObjectId;
 import com.google.cloud.bigquery.*;
 import com.google.cloud.storage.BlobId;
