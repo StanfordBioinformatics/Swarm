@@ -811,7 +811,8 @@ public class Controller {
 
         log.info("Serializing athena table");
         jsonWriter.name("athena").beginObject();
-        athenaClient.serializeTableToJSON(athenaTableIdentifier.tableName, jsonWriter, returnResults);
+        //athenaClient.serializeTableToJSON(athenaTableIdentifier.tableName, jsonWriter, returnResults);
+        athenaClient.serializeVcfTableToJson(athenaTableIdentifier.tableName, jsonWriter);
 
         jsonWriter.endObject();
 
