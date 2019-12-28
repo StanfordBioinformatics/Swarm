@@ -25,6 +25,7 @@ import java.sql.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static app.dao.client.StringUtils.*;
@@ -860,6 +861,17 @@ public class AthenaClient {
         jsonWriter.endArray();
     }
 
+    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
+        List<String> cols = this.getTableColumns(tableName);
+        Predicate<String> ignoreColPredicate = s -> s.endsWith("_ignore");
+        List<String> filteredCols = cols.stream()
+                .filter(ignoreColPredicate.negate())
+                .collect(Collectors.toList());
+        String query = "select " + String.join(", ", filteredCols) +
+                " from " + quoteAthenaTableIdentifier(this.databaseName + "." + tableName);
+        serializeVcfQueryToJson(query, jsonWriter);
+    }
+
     /**
      * Assumes writer is placed at the appropriate location of the stream.
      *
@@ -885,7 +897,7 @@ public class AthenaClient {
         jsonWriter.name("swarm_database_type").value("athena");
         jsonWriter.name("swarm_database_name").value(this.databaseName);
         jsonWriter.name("swarm_table_name").value(tableName);
-        jsonWriter.name("data_count").value(rows.size());
+        jsonWriter.name("data_count").value(rows.size() - 1); // exclude headers row from result set
 
         jsonWriter.name("headers").beginArray();
         for (String columnName : columnNames) {
@@ -913,7 +925,9 @@ public class AthenaClient {
                 Double d;
                 Long l;
                 // attempt to convert to numeric types
-                if ((d = StringUtils.toDoubleNullable(val)) != null) {
+                if (val == null || val.isEmpty()) {
+                    jsonWriter.value(val);
+                } else if ((d = StringUtils.toDoubleNullable(val)) != null) {
                     jsonWriter.value(d);
                 } else if ((l = StringUtils.toLongNullable(val)) != null) {
                     jsonWriter.value(l);

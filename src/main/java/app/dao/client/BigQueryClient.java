@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static app.dao.client.StringUtils.*;
@@ -451,23 +452,19 @@ public class BigQueryClient implements DatabaseClientInterface {
      */
     public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter)
             throws InterruptedException, IOException {
-//        Table table = this.bigquery.getTable(TableId.of(this.datasetName, tableName1));
-//        table.getDefinition().getSchema();
-//        String query;
-//        if (tableName2 != null) {
-//            query = String.format("select * from \"%s\".\"%s\", \"%s\".\"%s\"",
-//                    this.datasetName, tableName1, this.datasetName, tableName2);
-//        } else {
-//            query = String.format("select * from \"%s\".\"%s\"",
-//                    this.datasetName, tableName1);
-//        }
-
         TableResult tr = this.runSimpleQuery(query);
         Schema schema = tr.getSchema();
         FieldList fieldList = schema.getFields();
         List<String> columnNames = new ArrayList<>();
+        Predicate<String> ignoreColPredicate = s -> !s.endsWith("_please_ignore");
+//        List<String> filteredCols = columnNames.stream()
+//                .filter(ignoreColPredicate.negate())
+//                .collect(Collectors.toList());
         for (Field f : fieldList) {
-            columnNames.add(f.getName());
+            if (ignoreColPredicate.test(f.getName())) {
+                columnNames.add(f.getName());
+            }
+
         }
         Long totalRows = tr.getTotalRows();
 
@@ -561,7 +558,7 @@ public class BigQueryClient implements DatabaseClientInterface {
         // StandardSQLTypeName.FLOAT64
         // StandardSQLTypeName.INT64
         // StandardSQLTypeName.NUMERIC
-        jsonWriter.name("swarm_database_type").value("athena");
+        jsonWriter.name("swarm_database_type").value("bigquery");
         jsonWriter.name("swarm_database_name").value(this.datasetName);
         jsonWriter.name("swarm_table_name").value(tableName);
         jsonWriter.name("data_count").value(totalRows);
