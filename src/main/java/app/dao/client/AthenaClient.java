@@ -791,7 +791,7 @@ public class AthenaClient {
                 sampleColumnsList.add(s);
             }
         }
-        log.debug("Sample column headers: " + Arrays.toString(sampleColumnsList.toArray()));
+        //log.debug("Sample column headers: " + Arrays.toString(sampleColumnsList.toArray()));
         List<String> columnsToWrite = Arrays.asList(
                 "reference_name", "start_position", "end_position", "id",
                 "reference_bases", "alternate_bases", "allele_count", "af");
