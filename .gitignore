@@ -12,3 +12,6 @@ target/
 gcp.json
 aws.properties
 
+# server files
+log/
+
