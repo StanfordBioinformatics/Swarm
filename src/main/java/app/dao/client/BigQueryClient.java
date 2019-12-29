@@ -374,16 +374,29 @@ public class BigQueryClient implements DatabaseClientInterface {
         return merged;
     }
 
-    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter)
+    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData)
             throws IOException, InterruptedException {
-        String sql = "select * from `" + this.datasetName + "." + tableName + "`";
-        serializeVcfQueryToJson(sql, jsonWriter);
+        List<String> cols = this.getTableColumns(tableName);
+        Predicate<String> ignoreColPredicate = s -> s.endsWith("_please_ignore");
+        List<String> filteredCols = cols.stream()
+                .filter(ignoreColPredicate.negate())
+                .collect(Collectors.toList());
+        String query = "select " + String.join(", ", filteredCols) +
+                " from " + String.format("`%s.%s`", datasetName, tableName);
+
+        //String sql = "select * from `" + this.datasetName + "." + tableName + "`";
+
+        jsonWriter.name("swarm_database_type").value("bigquery");
+        jsonWriter.name("swarm_database_name").value(this.datasetName);
+        jsonWriter.name("swarm_table_name").value(tableName);
+
+        serializeVcfQueryToJson(query, jsonWriter, writeData);
     }
 
-    public void mergeAndSerializeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
-            throws IOException, InterruptedException {
-        mergeAndSerializeVcfTablesToJson(tableName1, "a", tableName2, "b", jsonWriter);
-    }
+//    public void mergeAndSerializeVcfTablesToJson(String tableName1, String tableName2, JsonWriter jsonWriter)
+//            throws IOException, InterruptedException {
+//        mergeAndSerializeVcfTablesToJson(tableName1, "a", tableName2, "b", jsonWriter);
+//    }
 
     public String getMergedVcfSelect(
             String tableName1, String table1Alias,
@@ -432,14 +445,14 @@ public class BigQueryClient implements DatabaseClientInterface {
         return sql;
     }
 
-    // TODO
-    public void mergeAndSerializeVcfTablesToJson(
-            String tableName1, String table1Alias,
-            String tableName2, String table2Alias,
-            JsonWriter jsonWriter) throws IOException, InterruptedException {
-        String sql = getMergedVcfSelect(tableName1, table1Alias, tableName2, table2Alias);
-        serializeVcfQueryToJson(sql, jsonWriter);
-    }
+
+//    public void mergeAndSerializeVcfTablesToJson(
+//            String tableName1, String table1Alias,
+//            String tableName2, String table2Alias,
+//            JsonWriter jsonWriter) throws IOException, InterruptedException {
+//        String sql = getMergedVcfSelect(tableName1, table1Alias, tableName2, table2Alias);
+//        serializeVcfQueryToJson(sql, jsonWriter);
+//    }
 
     /**
      * Serializes a vcf-conformant query to json, combining the samples to allele counts and splitting alternates into
@@ -451,6 +464,11 @@ public class BigQueryClient implements DatabaseClientInterface {
      * @throws IOException if error in writing
      */
     public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter)
+            throws IOException, InterruptedException {
+        serializeVcfQueryToJson(query, jsonWriter, true);
+    }
+
+    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter, boolean writeData)
             throws InterruptedException, IOException {
         TableResult tr = this.runSimpleQuery(query);
         Schema schema = tr.getSchema();
@@ -480,11 +498,18 @@ public class BigQueryClient implements DatabaseClientInterface {
                 "reference_name", "start_position", "end_position", "id",
                 "reference_bases", "alternate_bases", "allele_count", "af");
 
+        jsonWriter.name("data_count").value(totalRows);
+
         jsonWriter.name("headers").beginArray();
         for (String columnName : columnsToWrite) {
             jsonWriter.value(columnName);
         }
         jsonWriter.endArray();
+
+        if (!writeData) {
+            jsonWriter.name("message").value("To return data in response, set return_results query parameter to true");
+            return;
+        }
 
         jsonWriter.name("data").beginArray();
 
@@ -511,14 +536,14 @@ public class BigQueryClient implements DatabaseClientInterface {
                 }
             }
             // debug the counts
-            System.out.println(String.format(
-                    "reference_bases: %s, allele_count: %d",
-                    fieldValueList.get("reference_bases").getStringValue(), alleleCounts[0]));
-            for (int i = 0; i < alternateBases.length; i++) {
-                System.out.println(String.format(
-                        "alternate_bases: %s, allele_count: %d",
-                        alternateBases[i], alleleCounts[i+1]));
-            }
+//            System.out.println(String.format(
+//                    "reference_bases: %s, allele_count: %d",
+//                    fieldValueList.get("reference_bases").getStringValue(), alleleCounts[0]));
+//            for (int i = 0; i < alternateBases.length; i++) {
+//                System.out.println(String.format(
+//                        "alternate_bases: %s, allele_count: %d",
+//                        alternateBases[i], alleleCounts[i+1]));
+//            }
 
             // Write out the data, one row per each alternate bases
             for (int i = 0; i < alternateBases.length; i++) {

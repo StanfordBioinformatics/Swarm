@@ -771,7 +771,11 @@ public class AthenaClient {
      * @throws InterruptedException if interrupted
      * @throws IOException if error in writing
      */
-    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter)
+    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter) throws IOException, InterruptedException {
+        serializeVcfQueryToJson(query, jsonWriter, true);
+    }
+
+    public void serializeVcfQueryToJson(String query, JsonWriter jsonWriter, boolean writeData)
             throws InterruptedException, IOException {
         GetQueryResultsResult getQueryResultsResult = this.executeQueryToResultSet(query);
         ResultSet rs = getQueryResultsResult.getResultSet();
@@ -796,11 +800,18 @@ public class AthenaClient {
                 "reference_name", "start_position", "end_position", "id",
                 "reference_bases", "alternate_bases", "allele_count", "af");
 
+        jsonWriter.name("data_count").value(rows.size());
+
         jsonWriter.name("headers").beginArray();
         for (String columnName : columnsToWrite) {
             jsonWriter.value(columnName);
         }
         jsonWriter.endArray();
+
+        if (!writeData) {
+            jsonWriter.name("message").value("To return data in response, set return_results query parameter to true");
+            return;
+        }
 
         jsonWriter.name("data").beginArray();
         Iterator<Row> rowIterator = rows.iterator();
@@ -861,7 +872,7 @@ public class AthenaClient {
         jsonWriter.endArray();
     }
 
-    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter) throws IOException, InterruptedException {
+    public void serializeVcfTableToJson(String tableName, JsonWriter jsonWriter, boolean writeData) throws IOException, InterruptedException {
         List<String> cols = this.getTableColumns(tableName);
         Predicate<String> ignoreColPredicate = s -> s.endsWith("_ignore");
         List<String> filteredCols = cols.stream()
@@ -869,7 +880,12 @@ public class AthenaClient {
                 .collect(Collectors.toList());
         String query = "select " + String.join(", ", filteredCols) +
                 " from " + quoteAthenaTableIdentifier(this.databaseName + "." + tableName);
-        serializeVcfQueryToJson(query, jsonWriter);
+
+        jsonWriter.name("swarm_database_type").value("athena");
+        jsonWriter.name("swarm_database_name").value(databaseName);
+        jsonWriter.name("swarm_table_name").value(tableName);
+
+        serializeVcfQueryToJson(query, jsonWriter, writeData);
     }
 
     /**
@@ -880,6 +896,10 @@ public class AthenaClient {
      * @param tableName table to query and serialize
      * @param jsonWriter JsonWriter to write JSON data into. This can wrap any Writer, for example StringWriter, HttpServletResponse.getWriter
      */
+    public void serializeTableToJSON(String tableName, JsonWriter jsonWriter) throws IOException {
+        serializeTableToJSON(tableName, jsonWriter, true);
+    }
+
     public void serializeTableToJSON(String tableName, JsonWriter jsonWriter, boolean writeData) throws IOException {
         String query = String.format("select * from \"%s\".\"%s\"", this.databaseName, tableName);
         GetQueryResultsResult getQueryResultsResult = executeQueryToResultSet(query);

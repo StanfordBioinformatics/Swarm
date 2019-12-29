@@ -321,75 +321,6 @@ public class Controller {
     }
 
 
-    @RequestMapping(
-            value = "/variants_by_gene/{gene_label}",
-            method = {RequestMethod.GET}
-    )
-    public void getVariantsByGene(
-            @PathVariable("gene_label") String geneLabel,
-            @RequestParam(required = false, defaultValue = "all", name = "sourceCloud") String sourceCloud,
-            @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
-            HttpServletRequest request, HttpServletResponse response
-    ) throws IOException, InterruptedException, TimeoutException, ExecutionException {
-        boolean returnResults = false;
-        if (!StringUtils.isEmpty(returnResultsParam)) {
-            if (returnResultsParam.equals("true")) {
-                returnResults = true;
-            } else if (!returnResultsParam.equals("false")) {
-                throw new ValidationException("Invalid param for return_results, must be true or false");
-            }
-        }
-
-        GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
-        if (geneCoordinate == null) {
-            throw new IllegalArgumentException("Gene could not be found in coordinates table");
-        }
-        log.info("Delegating to Controller.getVariants");
-
-        SwarmTableIdentifier swarmTableIdentifier = this.getVariants(
-                sourceCloud,
-                Optional.empty(),
-                geneCoordinate.referenceName,
-                geneCoordinate.startPosition.toString(),
-                geneCoordinate.endPosition.toString(),
-                null,
-                null,
-                "true",
-                null);
-
-        if (swarmTableIdentifier == null) {
-            throw new IllegalArgumentException("Failed to query for variants");
-        }
-
-        response.setHeader("Content-Type", "application/json");
-        StringWriter stringWriter = new StringWriter();
-        JsonWriter jsonWriter = new JsonWriter(stringWriter);
-        jsonWriter.beginObject();
-
-        if (swarmTableIdentifier.databaseType.equals("athena")) {
-            //athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            //athenaClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
-            athenaClient.serializeTableToJSON(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-        } else if (swarmTableIdentifier.databaseType.equals("bigquery")) {
-            //bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-            //bigQueryClient.serializeMergedVcfTableToJson(swarmTableIdentifier.tableName, jsonWriter);
-            bigQueryClient.serializeTableToJson(swarmTableIdentifier.tableName, jsonWriter, returnResults);
-
-        } else {
-            throw new IllegalStateException("Unknown databaseType " + swarmTableIdentifier.databaseType);
-        }
-
-        if (!returnResults) {
-            jsonWriter.name("data_message").value("To return data in response, set return_results query parameter to true");
-        }
-
-        jsonWriter.endObject();
-
-        String responseString = stringWriter.toString();
-        response.setContentLengthLong(responseString.length());
-        response.getWriter().write(responseString);
-    }
-
     /**
      * Returns a map with two entries, half1 and half2. These are in turn a map of
      * SuperPopulation label to a list of sample labels.
@@ -723,6 +654,7 @@ public class Controller {
             @RequestParam(required = false, name = "reference_bases") String referenceBasesParam,
             @RequestParam(required = false, name = "alternate_bases") String alternateBasesParam,
             @RequestParam(required = false, name = "rsid") String rsidParam,
+            @RequestParam(required = false, name = "gene") String geneLabel,
             @RequestParam(required = false, name = "position_range", defaultValue = "true") String positionRange,
             @RequestParam(required = false, name = "return_results", defaultValue = "false") String returnResultsParam,
             HttpServletRequest request, HttpServletResponse response
@@ -736,6 +668,20 @@ public class Controller {
             }
         }
 
+        // Don't allow conflicting filters
+        if (!StringUtils.isEmpty(geneLabel)) {
+            if (!StringUtils.isAllEmpty(rsidParam, referenceNameParam, startPositionParam, endPositionParam)) {
+                throw new ValidationException("Cannot mix gene filter with coordinate or rsid filters");
+            }
+            GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+            if (geneCoordinate == null) {
+                throw new IllegalArgumentException("Gene could not be found in coordinates table");
+            }
+            referenceNameParam = geneCoordinate.referenceName;
+            startPositionParam = geneCoordinate.startPosition.toString();
+            endPositionParam = geneCoordinate.endPosition.toString();
+        }
+
         // Require some positional filter parameters
         // Make this more intelligent
         if (StringUtils.isEmpty(rsidParam)) {
@@ -747,16 +693,18 @@ public class Controller {
             }
         }
 
-
+        final String finalReferenceNameParam = referenceNameParam,
+                finalStartPositionParam = startPositionParam,
+                finalEndPositionParam = endPositionParam;
         Callable<SwarmTableIdentifier> athenaCallable = new Callable<SwarmTableIdentifier>() {
             @Override
             public SwarmTableIdentifier call() throws Exception {
                 return getVariants(
                         "athena",
                         Optional.empty(),
-                        referenceNameParam,
-                        startPositionParam,
-                        endPositionParam,
+                        finalReferenceNameParam,
+                        finalStartPositionParam,
+                        finalEndPositionParam,
                         referenceBasesParam,
                         alternateBasesParam,
                         positionRange,
@@ -769,9 +717,9 @@ public class Controller {
                 return getVariants(
                         "bigquery",
                         Optional.empty(),
-                        referenceNameParam,
-                        startPositionParam,
-                        endPositionParam,
+                        finalReferenceNameParam,
+                        finalStartPositionParam,
+                        finalEndPositionParam,
                         referenceBasesParam,
                         alternateBasesParam,
                         positionRange,
@@ -788,6 +736,7 @@ public class Controller {
         executorService.awaitTermination(waitMinutes, TimeUnit.MINUTES);
         executorService.shutdown();
         log.info("Finished shutting down executor service");
+        // These should be completed immediately with no wait
         log.info("Getting athena future");
         SwarmTableIdentifier athenaTableIdentifier = athenaFuture.get(10, TimeUnit.MINUTES);
         log.info("Getting bigquery future");
@@ -804,14 +753,14 @@ public class Controller {
         log.info("Serializing athena table");
         jsonWriter.name("athena").beginObject();
         //athenaClient.serializeTableToJSON(athenaTableIdentifier.tableName, jsonWriter, returnResults);
-        athenaClient.serializeVcfTableToJson(athenaTableIdentifier.tableName, jsonWriter);
+        athenaClient.serializeVcfTableToJson(athenaTableIdentifier.tableName, jsonWriter, returnResults);
 
         jsonWriter.endObject();
 
         log.info("Serializing bigquery table");
         jsonWriter.name("bigquery").beginObject();
         //bigQueryClient.serializeTableToJson(bigqueryTableIdentifier.tableName, jsonWriter, returnResults);
-        bigQueryClient.serializeVcfTableToJson(bigqueryTableIdentifier.tableName, jsonWriter);
+        bigQueryClient.serializeVcfTableToJson(bigqueryTableIdentifier.tableName, jsonWriter, returnResults);
         jsonWriter.endObject();
 
         // serialize the table into the response, in JSON format.
