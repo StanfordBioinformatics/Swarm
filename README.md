@@ -1,4 +1,4 @@
-# genome-query
+# Swarm
 
 This is a Spring Boot server that queries genomic variants from Google BigQuery and Amazon Athena.
 
@@ -23,4 +23,4 @@ $ mvn package
 
 Maven builds a jar and puts it in `target/` directory.  It defaults to port 8080, which must be unbound prior to running.
 ```
-$ java -jar target/genome-query-1.0-SNAPSHOT.jar
+$ java -jar target/swarm-1.0-SNAPSHOT.jar
