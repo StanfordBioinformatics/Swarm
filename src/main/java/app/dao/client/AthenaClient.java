@@ -445,8 +445,10 @@ public class AthenaClient {
         query += "CREATE EXTERNAL TABLE IF NOT EXISTS " +
                 fullTableName +
                 " (" + fieldString + ")\n" +
+//                "STORED AS PARQUET \n" +
                 "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\n" +
                 "WITH SERDEPROPERTIES (\n" +
+                "  'compressionType' = 'GZIP',\n" +
                 "  'serialization.format' = ',',\n" +
                 "  'field.delim' = ','\n" +
                 ") " +

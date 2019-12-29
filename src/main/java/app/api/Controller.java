@@ -410,13 +410,18 @@ public class Controller {
             @Override
             public GeneCoordinate call() throws Exception {
                 // get gene coordinates
+//                String coordSql =
+//                        "select chromosome, start_position, end_position"
+//                                + " from swarm.relevant_genes_view_hg19"
+//                                + " where gene_name = ?";
                 String coordSql =
-                        "select chromosome, start_position, end_position"
-                                + " from swarm.relevant_genes_view_hg19"
-                                + " where gene_name = ?";
+                        "select reference_name, start_position, end_position"
+                        + " from swarm.hg19_UCSC_refGene"
+                        + " where name2 = ?";
                 QueryJobConfiguration coordJobConfig = QueryJobConfiguration.newBuilder(coordSql)
                         .addPositionalParameter(QueryParameterValue.string(geneLabel))
                         .build();
+                System.out.println("Executing query for " + geneLabel + ":\n" + coordSql);
                 TableResult coordTr = getBigQueryClient().runQueryJob(coordJobConfig);
                 assert(coordTr.getTotalRows() == 1);
                 Iterator<FieldValueList> fieldValueListIterator = coordTr.iterateAll().iterator();
@@ -426,12 +431,13 @@ public class Controller {
                 }
                 FieldValueList fieldValues = fieldValueListIterator.next();
                 GeneCoordinate coordinate = new GeneCoordinate();
-                coordinate.referenceName = fieldValues.get("chromosome").getStringValue();
+                coordinate.referenceName = fieldValues.get("reference_name").getStringValue();
                 coordinate.startPosition = fieldValues.get("start_position").getLongValue();
                 coordinate.endPosition = fieldValues.get("end_position").getLongValue();
 
-                System.out.printf("Gene %s has hg19 coordinates %s:%d-%d\n",
-                        geneLabel, coordinate.referenceName, coordinate.startPosition, coordinate.endPosition);
+                log.debug(String.format("Gene %s has hg19 coordinates %s:%d-%d",
+                        geneLabel, coordinate.referenceName,
+                        coordinate.startPosition, coordinate.endPosition));
                 return coordinate;
             }
         };
@@ -450,6 +456,62 @@ public class Controller {
         // this could be null if no coordinate is found
         return geneCoordinate;
     }
+
+
+//    private GeneCoordinate getGeneCoordinates(String geneLabel) throws InterruptedException, ExecutionException, TimeoutException {
+//        Pattern geneNamePattern = Pattern.compile("[a-zA-Z0-9]+");
+//        Matcher geneNameMatcher = geneNamePattern.matcher(geneLabel);
+//        if (!geneNameMatcher.matches()) {
+//            throw new ValidationException("Gene name did not match regex filter");
+//            //response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Gene name did not match regex filter");
+//            //return;
+//        }
+//
+//        ExecutorService executorService = Executors.newFixedThreadPool(2);
+//        Callable<GeneCoordinate> geneLookupCallable = new Callable<GeneCoordinate>() {
+//            @Override
+//            public GeneCoordinate call() throws Exception {
+//                // get gene coordinates
+//                String coordSql =
+//                        "select chromosome, start_position, end_position"
+//                                + " from swarm.relevant_genes_view_hg19"
+//                                + " where gene_name = ?";
+//                QueryJobConfiguration coordJobConfig = QueryJobConfiguration.newBuilder(coordSql)
+//                        .addPositionalParameter(QueryParameterValue.string(geneLabel))
+//                        .build();
+//                TableResult coordTr = getBigQueryClient().runQueryJob(coordJobConfig);
+//                assert(coordTr.getTotalRows() == 1);
+//                Iterator<FieldValueList> fieldValueListIterator = coordTr.iterateAll().iterator();
+//                if (!fieldValueListIterator.hasNext()) {
+//                    log.warn("No coordinate found for gene: " + geneLabel);
+//                    return null;
+//                }
+//                FieldValueList fieldValues = fieldValueListIterator.next();
+//                GeneCoordinate coordinate = new GeneCoordinate();
+//                coordinate.referenceName = fieldValues.get("chromosome").getStringValue();
+//                coordinate.startPosition = fieldValues.get("start_position").getLongValue();
+//                coordinate.endPosition = fieldValues.get("end_position").getLongValue();
+//
+//                System.out.printf("Gene %s has hg19 coordinates %s:%d-%d\n",
+//                        geneLabel, coordinate.referenceName, coordinate.startPosition, coordinate.endPosition);
+//                return coordinate;
+//            }
+//        };
+//
+//        final GeneCoordinate geneCoordinate;
+//        Future<GeneCoordinate> coordinateFuture = executorService.submit(geneLookupCallable);
+//        executorService.shutdown();
+//        try {
+//            geneCoordinate = coordinateFuture.get(3 * 60, TimeUnit.SECONDS);
+//        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+//            //e.printStackTrace();
+//            //response.sendError(500, "Failed to determine gene coordinates");
+//            //return;
+//            throw e;
+//        }
+//        // this could be null if no coordinate is found
+//        return geneCoordinate;
+//    }
 
 
 
@@ -1284,7 +1346,7 @@ public class Controller {
                 String s3BigQueryImportDirectory = pathJoin(
                         athenaClient.getStorageBucket(),
                         "bigquery-imports/" + bigqueryOutputId + "/");
-                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.csv.gz");
                 log.info("Copying bigquery output id: " + bigqueryOutputId
                         + " from " + bigqueryResultDirectoryUrl
                         + " to " + s3BigQueryImportFile);
@@ -1848,12 +1910,12 @@ public class Controller {
                         + " from " + bigqueryResultDirectoryUrl
                         + " to " + s3BigQueryImportFile);
                 S3UploadStream s3UploadStream = new S3UploadStream(s3Client, s3BigQueryImportFile);
-                GCSDirectoryConcatInputStream gcsDirGzipInputStream =
+                GCSDirectoryConcatInputStream gcsDirInputStream =
                         new GCSDirectoryConcatInputStream(gcsClient, bigqueryResultDirectoryUrl);
                 log.info("Initiating transfer");
-                gcsDirGzipInputStream.transferTo(s3UploadStream);
+                gcsDirInputStream.transferTo(s3UploadStream);
                 log.debug("Closing GCS input stream");
-                gcsDirGzipInputStream.close();
+                gcsDirInputStream.close();
                 log.debug("Closing S3 output stream");
                 s3UploadStream.close();
                 log.debug("Finished transfer from GCS to S3");
@@ -1866,7 +1928,7 @@ public class Controller {
                 log.info("Finished creating table: " + importedBigqueryTableName);
                 annotationTableIdentifier.databaseType = destinationDatabaseType;
                 annotationTableIdentifier.tableName = importedBigqueryTableName;
-            } else if (annotationTableIdentifier.databaseType.equals("bigquery")) {
+            } else if (destinationDatabaseType.equals("bigquery")) {
                 log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
                 // Copy variant results from bigquery to athena
                 String athenaResultDirectoryUrl = variantTableIdentifier.storageUrl;
@@ -1915,7 +1977,7 @@ public class Controller {
                 String gcsAthenaImportDirectory = pathJoin(
                         bigQueryClient.getStorageBucket(),
                         "athena-imports/" + athenaOutputId);
-                String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.parquet");
+                String gcsAthenaImportFile = pathJoin(gcsAthenaImportDirectory, "import.csv.gz");
                 log.info("Copying athena output id: " + athenaOutputId
                         + " from " + athenaResultDirectoryUrl
                         + " to " + gcsAthenaImportFile);
@@ -1944,7 +2006,7 @@ public class Controller {
                 log.info("Variants are in athena, annotation is in bigquery, user requested results in bigquery");
                 variantTableIdentifier.databaseType = destinationDatabaseType;
                 variantTableIdentifier.tableName = importedAthenaTableName;
-            } else if (annotationTableIdentifier.databaseType.equals("athena")) {
+            } else if (destinationDatabaseType.equals("athena")) {
                 log.info("Variants are in athena, annotation is in bigquery, user requested results in athena");
                 // Copy annotation results from bigquery to athena
                 String bigqueryResultDirectoryUrl = variantTableIdentifier.storageUrl;
@@ -1952,7 +2014,7 @@ public class Controller {
                 String s3BigQueryImportDirectory = pathJoin(
                         athenaClient.getStorageBucket(),
                         "bigquery-imports/" + bigqueryOutputId + "/");
-                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.parquet");
+                String s3BigQueryImportFile = pathJoin(s3BigQueryImportDirectory, "import.csv.gz");
                 log.info("Copying bigquery output id: " + bigqueryOutputId
                         + " from " + bigqueryResultDirectoryUrl
                         + " to " + s3BigQueryImportFile);
