@@ -446,14 +446,17 @@ public class AthenaClient {
                 fullTableName +
                 " (" + fieldString + ")\n" +
 //                "STORED AS PARQUET \n" +
-                "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\n" +
+//                "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\n" +
+                "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'" +
                 "WITH SERDEPROPERTIES (\n" +
                 "  'compressionType' = 'GZIP',\n" +
                 "  'serialization.format' = ',',\n" +
-                "  'field.delim' = ','\n" +
+                "  'separatorChar' = ',',\n" +
+                "  'skip.header.line.count'= '1'\n" +
                 ") " +
                 "LOCATION '" + s3DirectoryUrl + "'\n" +
                 "TBLPROPERTIES ('has_encrypted_data'='false');";
+        log.debug("Creating table with query:\n" + query);
         StartQueryExecutionRequest startRequest = new StartQueryExecutionRequest()
                 .withResultConfiguration(
                         new ResultConfiguration()
@@ -663,8 +666,8 @@ public class AthenaClient {
                 // end of column data
                 break;
             }
-            if (vals.length != 2) {
-                throw new RuntimeException("DESCRIBE datum didn't have 2 terms: ["+ Arrays.toString(vals) +"]");
+            if (vals.length < 2) {
+                throw new RuntimeException("DESCRIBE datum didn't have at least 2 terms: ["+ Arrays.toString(vals) +"]");
             }
             String colName = vals[0];
             //String type = vals[1];
