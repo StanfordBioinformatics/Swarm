@@ -278,10 +278,13 @@ public class AthenaClient {
         log.info("Waiting for query execution " + executionId + " to finish");
         waitForQueryExecution(executionId, 5 * 60 * 1000);
         log.info("Query execution " + executionId + " finished");
-//        GetQueryResultsRequest getQueryResultsRequest =
-//                new GetQueryResultsRequest().withQueryExecutionId(executionId);
-//        GetQueryResultsResult getQueryResultsResult =
-//                this.athena.getQueryResults(getQueryResultsRequest);
+
+        GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
+                .withQueryExecutionId(executionId);
+        GetQueryExecutionResult getQueryExecutionResult = athena.getQueryExecution(getQueryExecutionRequest);
+        QueryExecutionStatistics queryExecutionStatistics = getQueryExecutionResult.getQueryExecution().getStatistics();
+        log.info("Athena bytes scanned: " + queryExecutionStatistics.getDataScannedInBytes().toString());
+        log.info("Athena execution time: " + (double)queryExecutionStatistics.getEngineExecutionTimeInMillis()/1000);
 
         // delete table unless told not to
         if (deleteResultTable.isPresent() && !deleteResultTable.get()) {
@@ -604,10 +607,9 @@ public class AthenaClient {
         GetQueryExecutionResult getQueryExecutionResult = athena.getQueryExecution(getQueryExecutionRequest);
         QueryExecutionStatistics queryExecutionStatistics = getQueryExecutionResult.getQueryExecution().getStatistics();
         log.info("Athena bytes scanned: " + queryExecutionStatistics.getDataScannedInBytes().toString());
-        //return getQueryResultsResult.getResultSet();
+        log.info("Athena execution time: " + (double)queryExecutionStatistics.getEngineExecutionTimeInMillis()/1000);
 
         return getQueryResultsResult;
-        //return rs;
     }
 
     @Deprecated
@@ -848,14 +850,14 @@ public class AthenaClient {
                 }
             }
             // debug the counts
-            System.out.println(String.format(
-                    "reference_bases: %s, allele_count: %d",
-                    getColVal.apply("reference_bases"), alleleCounts[0]));
-            for (int i = 0; i < alternateBases.length; i++) {
-                System.out.println(String.format(
-                        "alternate_bases: %s, allele_count: %d",
-                        alternateBases[i], alleleCounts[i+1]));
-            }
+//            System.out.println(String.format(
+//                    "reference_bases: %s, allele_count: %d",
+//                    getColVal.apply("reference_bases"), alleleCounts[0]));
+//            for (int i = 0; i < alternateBases.length; i++) {
+//                System.out.println(String.format(
+//                        "alternate_bases: %s, allele_count: %d",
+//                        alternateBases[i], alleleCounts[i+1]));
+//            }
 
             // Write out the data, one row per each alternate bases
             for (int i = 0; i < alternateBases.length; i++) {

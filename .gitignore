@@ -1,5 +1,6 @@
 # IDE files
 .idea/
+*.iml
 .vscode/
 .classpath
 .project
@@ -14,4 +15,4 @@ aws.properties
 
 # server files
 log/
-
+*.log

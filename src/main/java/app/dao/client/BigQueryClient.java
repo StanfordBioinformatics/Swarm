@@ -205,6 +205,12 @@ public class BigQueryClient implements DatabaseClientInterface {
         }
         log.info("Finished query job " + job.getJobId());
 
+        JobStatistics jobStatistics = job.getStatistics();
+        // Get the query-specific statistics
+        JobStatistics.QueryStatistics queryStatistics = (JobStatistics.QueryStatistics) jobStatistics;
+        log.info("BigQuery bytes scanned: " + queryStatistics.getTotalBytesProcessed());
+        log.info("BigQuery execution time: " + (double)(queryStatistics.getEndTime() - queryStatistics.getStartTime())/1000);
+
         // delete table unless told not to
         if (deleteResultTable.isPresent() && !deleteResultTable.get()) {
             log.info("Not deleting result table: " + destinationTableId.toString());
@@ -678,14 +684,13 @@ public class BigQueryClient implements DatabaseClientInterface {
         Job job = bigquery.getJob(jobId);
                 //BigQuery.JobOption.fields(BigQuery.JobField.values())
 
-        com.google.cloud.Service<BigQueryOptions> service = (com.google.cloud.Service<BigQueryOptions>) bigquery;
-
+        //com.google.cloud.Service<BigQueryOptions> service = (com.google.cloud.Service<BigQueryOptions>) bigquery;
         JobStatistics jobStatistics = job.getStatistics();
         // Get the query-specific statistics
         JobStatistics.QueryStatistics queryStatistics = (JobStatistics.QueryStatistics) jobStatistics;
 
-        log.info("Job statistics: " + queryStatistics.toString());
-        log.info("BigQuery bytes scanned: " + queryStatistics.getEstimatedBytesProcessed());
+        log.info("BigQuery bytes scanned: " + queryStatistics.getTotalBytesProcessed());
+        log.info("BigQuery execution time: " + (double)(queryStatistics.getEndTime() - queryStatistics.getStartTime())/1000);
         return tr;
     }
 
