@@ -807,7 +807,7 @@ public class AthenaClient {
                 "reference_name", "start_position", "end_position", "id",
                 "reference_bases", "alternate_bases", "allele_count", "af");
 
-        jsonWriter.name("data_count").value(rows.size());
+        jsonWriter.name("data_count").value(rows.size() - 1);
 
         jsonWriter.name("headers").beginArray();
         for (String columnName : columnsToWrite) {
