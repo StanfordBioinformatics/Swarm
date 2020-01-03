@@ -443,7 +443,7 @@ public class AthenaClient {
 //        fields.add("`alternate_bases` string");
 //        fields.add("`minor_af` double");
 //        fields.add("`allele_count` bigint");
-        String fieldString = String.join(",\n", fields);
+        String fieldString = String.join(", ", fields);
 
         query += "CREATE EXTERNAL TABLE IF NOT EXISTS " +
                 fullTableName +
