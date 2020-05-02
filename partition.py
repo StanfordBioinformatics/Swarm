@@ -12,30 +12,40 @@ spark = (SparkSession.builder.config(conf=conf)
 sql_context = SQLContext(sc)
 
 
-def install_and_import(packages):
-    for package_name in packages:
-        try:
-            __import__(package_name)
-        except ImportError:
-            import os
-            os.system('pip-2.7 install --user --upgrade ' + package_name)
-            # sc.install_pypi_package(package_name)
-            __import__(package_name)
+# def install_and_import(packages):
+#     for package_name in packages:
+#         try:
+#             __import__(package_name)
+#         except ImportError:
+#             import os
+#             os.system('pip-2.7 install --user --upgrade ' + package_name)
+#             # sc.install_pypi_package(package_name)
+#             exec(package_name + ' =__import__(package_name)')
+# packages = ['boto3', 'pandas', 'numpy']
+# install_and_import(packages)
 
 
-packages = ['boto3', 'pandas', 'numpy']
-install_and_import(packages)
+try: import boto3
+except ImportError:
+    os.system('pip-2.7 install --user --upgrade boto3')
+    import boto3
+try: import pandas
+except ImportError:
+    os.system('pip-2.7 install --user --upgrade pandas')
+    import pandas
+try: import numpy
+except ImportError:
+    os.system('pip-2.7 install --user --upgrade numpy')
+    import numpy
 
 print(sys.version_info)
 
 s3 = boto3.resource('s3')
 bucket_name = 'gbsc-aws-project-annohive-dev-user-krferrit-us-west-1'
-prefix = '1000Orig-half2-parquet-partitioned'
+prefix = '1000Orig-half2-parquet'
 
 print('Loading data')
-df = spark.read.load('s3n://gbsc-aws-project-annohive-dev-user-krferrit-us-west-1' \
-                     + '/1000Orig-half2-parquet' \
-                     + '/*')
+df = spark.read.load('s3n://%s/%s/*' % (bucket_name, prefix))
 print('Loaded %d rows from s3' % df.count())
 
 print('Converting POS to int')
@@ -67,21 +77,9 @@ def partition_and_submit_reference(global_df, reference_name, pos_bin_count=4000
     filtered_df.repartition('POS_BIN_ID', 'reference_name') \
         .write.mode('overwrite') \
         .partitionBy('POS_BIN_ID', 'reference_name') \
-        .parquet('s3a://' + bucket_name + '/1000Orig-half2-bucketed-4000/')
+        .parquet('s3n://' + bucket_name + '/1000Orig-half2-bucketed-4000/')
     print('finished writing parquet')
 
-
-# print('Writing partitions to S3')
-# (df
-#     .write
-#     #.option('path', 's3a://'+bucket_name+'/1000Orig-half2-bucketed-4000/') 
-#     .format('hive') 
-#     .mode('overwrite')
-#     #.bucketBy(4000, 'POS')
-#     #.foreachPartition(partition_handler)
-#     .parquet('s3a://'+bucket_name+'/1000Orig-half2-bucketed-4000/')
-#     #.saveAsTable('1000Orig_half2_bucketed_4000')
-# )
 
 references = [str(c) for c in range(1, 23)] + ['X', 'Y']
 # references = ['1']
