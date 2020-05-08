@@ -1,6 +1,7 @@
 package app.dao.client;
 
 import app.AppLogging;
+import app.dao.query.Coordinate;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
 import com.google.api.client.util.ArrayMap;
@@ -710,7 +711,7 @@ public class BigQueryClient implements DatabaseClientInterface {
     public TableResult runSimpleQuery(String sql, @NotNull Optional<TableId> destination) throws InterruptedException {
         log.debug("Running simple query:\n" + sql);
         QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder(sql);
-
+        builder.setUseQueryCache(true);
         TableId destId = null;
         if (destination.isPresent()) {
             destId = destination.get();
@@ -861,11 +862,27 @@ public class BigQueryClient implements DatabaseClientInterface {
     public QueryJobConfiguration variantQueryToQueryJobConfiguration(
             @NotNull VariantQuery variantQuery,
             @NotNull Optional<TableId> destinationTableId) {
-        StringBuilder sb = new StringBuilder(String.format(
-                "select %s from `%s`",
-                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
-                this.datasetName + "." + variantQuery.getTableIdentifier()
-        ));
+
+        StringBuilder sb = new StringBuilder("select");
+
+        if (variantQuery.getCountOnly()) {
+            sb.append(" count(*) as ct");
+        } else {
+            if (variantQuery.isVariantColumnsOnly()) {
+                sb.append(" ").append(StringUtils.join(vcfColumns, ", "));
+            } else {
+                List<String> colNames = this.getTableColumns(variantQuery.getTableIdentifier());
+                sb.append(" ").append(StringUtils.join(colNames, ", "));
+            }
+        }
+        sb.append(String.format(" from `%s`",
+                this.datasetName + "." + variantQuery.getTableIdentifier()));
+
+//        StringBuilder sb = new StringBuilder(String.format(
+//                "select %s from `%s`",
+//                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
+//                this.datasetName + "." + variantQuery.getTableIdentifier()
+//        ));
 
         QueryJobConfiguration.Builder builder = QueryJobConfiguration.newBuilder(sb.toString());
 
@@ -879,18 +896,18 @@ public class BigQueryClient implements DatabaseClientInterface {
         // position parameters
         if (variantQuery.getUsePositionAsRange()) {
             // range based is a special case
-            String whereTerm =
-                    " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
-                            + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
-                            + " or (start_position < %s and end_position > %s))"; // interval fully contains a gene
+//            String whereTerm =
+//                    " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
+//                            + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
+//                            + " or (start_position < %s and end_position > %s))"; // interval fully contains a gene
+            String whereTerm = "(start_position <= %s and start_position >= %s)";
             String start = variantQuery.getStartPosition() != null ?
                     variantQuery.getStartPosition().toString()
                     : "0";
             String end = variantQuery.getEndPosition() != null ?
                     variantQuery.getEndPosition().toString()
                     : Long.valueOf(Long.MAX_VALUE).toString();
-            whereTerm = String.format(whereTerm,
-                    start, end, start, end, start, end);
+            whereTerm = String.format(whereTerm, end, start);
             wheres.add(whereTerm);
 
         } else {

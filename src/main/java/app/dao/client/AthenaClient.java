@@ -3,6 +3,10 @@ package app.dao.client;
 import app.AppLogging;
 import app.dao.query.CountQuery;
 import app.dao.query.VariantQuery;
+import com.google.gson.stream.JsonWriter;
+import com.simba.athena.jdbc.Driver;
+import org.apache.logging.log4j.Logger;
+
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.PropertiesFileCredentialsProvider;
 import com.amazonaws.regions.Region;
@@ -12,9 +16,11 @@ import com.amazonaws.services.athena.AmazonAthenaClientBuilder;
 import com.amazonaws.services.athena.model.*;
 import com.amazonaws.services.athena.model.ResultSet;
 import com.amazonaws.services.s3.model.S3ObjectId;
-import com.google.gson.stream.JsonWriter;
-import com.simba.athena.jdbc.Driver;
-import org.apache.logging.log4j.Logger;
+
+//import software.amazon.awssdk.regions.Region;
+//import software.amazon.awssdk.services.athena.AthenaClient;
+//import software.amazon.awssdk.services.athena.model.*;
+//import software.amazon.awssdk.services.athena.paginators.GetQueryResultsIterable;
 
 import javax.annotation.Nullable;
 import javax.validation.ValidationException;
@@ -124,12 +130,16 @@ public class AthenaClient {
         return this.athena;
     }
 
+    public String getDatabaseName() {
+        return this.databaseName;
+    }
+
     private Connection getConnection() throws SQLException {
         Properties connectionInfo = new Properties();
         connectionInfo.setProperty("User", this.configuration.getProperty(PROP_NAME_KEY_ID));
         connectionInfo.setProperty("Password", this.configuration.getProperty(PROP_NAME_SECRET_KEY));
         //connectionInfo.setProperty("S3OutputLocation", this.outputLocation);
-        // DO NOT LOG jdbcUrl
+        // do not log jdbcUrl if it contains login details
         //String jdbcUrl = "jdbc:awsathena://AwsRegion=us-east-2;";
         String jdbcUrl = "jdbc:awsathena://AwsRegion=" + region.getName() + ";";
         jdbcUrl += String.format("S3OutputLocation=%s;", this.configuration.getProperty(PROP_NAME_OUTPUT_LOCATION));
@@ -281,7 +291,12 @@ public class AthenaClient {
 
         GetQueryExecutionRequest getQueryExecutionRequest = new GetQueryExecutionRequest()
                 .withQueryExecutionId(executionId);
+
         GetQueryExecutionResult getQueryExecutionResult = athena.getQueryExecution(getQueryExecutionRequest);
+//        GetQueryResultsPaginator
+        // TODO
+
+
         QueryExecutionStatistics queryExecutionStatistics = getQueryExecutionResult.getQueryExecution().getStatistics();
         log.info("Athena bytes scanned: " + queryExecutionStatistics.getDataScannedInBytes().toString());
         log.info("Athena execution time: " + (double)queryExecutionStatistics.getEngineExecutionTimeInMillis()/1000);
@@ -322,6 +337,9 @@ public class AthenaClient {
     }
 
 
+    public boolean usingBinId = true;
+    public Integer binIdInterval = 62500;
+
     public StartQueryExecutionRequest variantQueryToStartQueryExecutionRequest(
             @NotNull VariantQuery variantQuery,
             @NotNull ResultConfiguration resultConfiguration,
@@ -344,10 +362,26 @@ public class AthenaClient {
                     with
             ));
         }
-        sb.append(String.format(
-                "select %s from %s",
-                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
-                quotedTable));
+
+//        sb.append(String.format(
+//                "select %s from %s",
+//                variantQuery.getCountOnly() ? "count(*) as ct" : "*",
+//                quotedTable));
+
+        if (variantQuery.getCountOnly()) {
+            sb.append("select count(*) as ct");
+        } else {
+            sb.append("select ");
+            if (variantQuery.isVariantColumnsOnly()) {
+                sb.append(StringUtils.join(vcfColumns, ", "));
+            } else {
+                List<String> colNames = getTableColumns(variantQuery.getTableIdentifier());
+                colNames.remove("bin_id");
+                sb.append(StringUtils.join(colNames, ", "));
+            }
+        }
+        sb.append(" from ").append(quotedTable);
+
 
         List<String> wheres = new ArrayList<>();
         if (variantQuery.getReferenceName() != null) {
@@ -356,18 +390,27 @@ public class AthenaClient {
         // Position parameters
         if (variantQuery.getUsePositionAsRange()) {
             // range based is a special case
-            String whereTerm =
-                    " ((start_position >= %s and start_position <= %s)" // start pos overlaps gene
-                            + " or (end_position >= %s and end_position <= %s)" // end pos overlaps gene
-                            + " or (start_position < %s and end_position > %s))";
-            String start = variantQuery.getStartPosition() != null ?
-                    variantQuery.getStartPosition().toString()
-                    : "0";
-            String end = variantQuery.getEndPosition() != null ?
-                    variantQuery.getEndPosition().toString()
-                    : Long.valueOf(Long.MAX_VALUE).toString();
-            whereTerm = String.format(whereTerm,
-                    start, end, start, end, start, end);
+//            String whereTerm =
+//                    " ((start_position >= %d and start_position <= %d)" // start pos overlaps gene
+//                            + " or (end_position >= %d and end_position <= %d)" // end pos overlaps gene
+//                            + " or (start_position < %d and end_position > %d))";
+
+            Long start = variantQuery.getStartPosition() != null ? variantQuery.getStartPosition() : 0;
+            // Use Integer.MAX_VALUE because currently stored as `int` in athena.
+            // This is sufficient to represent the longest human chromosome.
+            Long end = variantQuery.getEndPosition() != null ? variantQuery.getEndPosition() : Integer.MAX_VALUE;
+//            String whereTerm = "(start_position <= %d and end_position >= %d)";
+            String whereTerm = "(start_position >= %d and start_position <= %d)";
+            whereTerm = String.format(whereTerm, start, end);
+
+
+            // Add bin_id
+            if (usingBinId) {
+                String binTerm = " and (bin_id <= cast((%d/%d) as integer) and bin_id >= cast((%d/%d) as integer))";
+                binTerm = String.format(binTerm, end, binIdInterval, start, binIdInterval);
+                log.info("Created bin_id term: " + binTerm);
+                whereTerm += binTerm;
+            }
             wheres.add(whereTerm);
 
         } else {
@@ -375,11 +418,23 @@ public class AthenaClient {
                 wheres.add("start_position "
                         + variantQuery.getStartPositionOperator()
                         + " " + prepareSqlBigInt(variantQuery.getStartPosition()));
+                if (usingBinId) {
+                    // TODO use getStartPositionOperator for bin_id?
+                    wheres.add(String.format("bin_id >= cast((%d/%d) as integer)",
+                            variantQuery.getStartPosition(),
+                            binIdInterval));
+                }
             }
-            if (variantQuery.getEndPosition() != null) {
-                wheres.add("end_position "
+            if (variantQuery.getEndPosition() != null) { // TODODO
+                wheres.add("start_position "
                         + variantQuery.getEndPositionOperator()
                         + " " + prepareSqlBigInt(variantQuery.getEndPosition()));
+                if (usingBinId) {
+                    // TODO use getEndPositionOperator for bin_id?
+                    wheres.add(String.format("bin_id >= cast((%d/%d) as integer)",
+                            variantQuery.getEndPosition(),
+                            binIdInterval));
+                }
             }
         }
 
@@ -647,6 +702,28 @@ public class AthenaClient {
         return new S3ObjectId(parser.bucket, parser.objectPath);
     }
 
+    public List<String> listTables() {
+        String sql = String.format("SHOW TABLES in %s;", this.databaseName);
+        GetQueryResultsResult getQueryResultsRequest = executeQueryToResultSet(sql);
+        ResultSet rs = getQueryResultsRequest.getResultSet();
+        List<String> tableNames = new ArrayList<>();
+        List<Row> rows = rs.getRows();
+        if (rows.size() == 0) {
+            log.warn("No rows returned from SHOW TABLES");
+        }
+        for (Row row : rows) {
+            List<Datum> data = row.getData();
+            if (data.size() > 1) {
+                throw new RuntimeException("SHOW TABLES row data had more than one entry: [" + row.toString() + "]");
+            }
+            String val = data.get(0).getVarCharValue();
+            if (val.length() > 0) {
+                tableNames.add(val);
+            }
+        }
+        return tableNames;
+    }
+
     public List<String> getTableColumns(String tableName) {
         String sql = "DESCRIBE " + String.format("`%s`.`%s`", databaseName, tableName) + ";";
         GetQueryResultsResult getQueryResultsResult = executeQueryToResultSet(sql);
@@ -664,7 +741,7 @@ public class AthenaClient {
             }
             String val = data.get(0).getVarCharValue();
             String[] vals = val.split("\\s+");
-            if (vals.length == 0) {
+            if (vals.length == 0 || val.startsWith("#")) {
                 // end of column data
                 break;
             }
@@ -796,9 +873,11 @@ public class AthenaClient {
         // Any columns not in vcfColumnsList are assumed to be sample columns
 
         List<String> vcfColumnsList = Arrays.asList(vcfColumns);
+        List<String> nonSampleColumns = new ArrayList<>(vcfColumnsList);
+        nonSampleColumns.add("bin_id");
         List<String> sampleColumnsList = new ArrayList<>();
         for (String s : columnNames) {
-            if (!StringUtils.listContainsIgnoreCase(vcfColumnsList, s)) {
+            if (!StringUtils.listContainsIgnoreCase(nonSampleColumns, s)) {
                 sampleColumnsList.add(s);
             }
         }

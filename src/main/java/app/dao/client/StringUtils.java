@@ -67,6 +67,7 @@ public class StringUtils extends org.apache.commons.lang3.StringUtils {
             alphaNumericChars = new Character[chars.size()];
             alphaNumericChars = chars.toArray(alphaNumericChars);
         }
+        assert(alphaNumericChars != null);
         for (int i = 0; i < length; i++) {
             char c = alphaNumericChars[random.nextInt(alphaNumericChars.length)];
             sb.append(c);

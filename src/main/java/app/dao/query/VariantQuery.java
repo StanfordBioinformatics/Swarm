@@ -22,6 +22,7 @@ public class VariantQuery {
     private boolean usePositionAsRange = false;
 
     private boolean countOnly = false;
+    private boolean variantColumnsOnly = true;
 
     private String tableIdentifier;
     //private boolean usePositionAsRange = false;
@@ -220,5 +221,13 @@ public class VariantQuery {
 
     public boolean getCountOnly() {
         return this.countOnly;
+    }
+
+    public void setVariantColumnsOnly(boolean variantColumnsOnly) {
+        this.variantColumnsOnly = variantColumnsOnly;
+    }
+
+    public boolean isVariantColumnsOnly() {
+        return this.variantColumnsOnly;
     }
 }

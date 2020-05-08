@@ -28,6 +28,13 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+<!--            <dependency>-->
+<!--                <groupId>software.amazon.awssdk</groupId>-->
+<!--                <artifactId>bom</artifactId>-->
+<!--                <version>2.13.11</version>-->
+<!--                <type>pom</type>-->
+<!--                <scope>import</scope>-->
+<!--            </dependency>-->
         </dependencies>
     </dependencyManagement>
 
@@ -119,7 +126,9 @@
             <artifactId>aws-java-sdk-athena</artifactId>
             <version>1.11.602</version>
         </dependency>
-        <!-- https://mvnrepository.com/artifact/com.amazonaws/aws-java-sdk-core -->
+
+
+        <!-- https://mvnrepository.com/artifact/com.amazonaws/aws-java-sdk-core-->
         <dependency>
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-core</artifactId>
@@ -131,6 +140,20 @@
             <artifactId>aws-java-sdk-s3</artifactId>
             <version>1.11.602</version>
         </dependency>
+<!--        &lt;!&ndash; https://mvnrepository.com/artifact/software.amazon.awssdk/athena &ndash;&gt;-->
+<!--        <dependency>-->
+<!--            <groupId>software.amazon.awssdk</groupId>-->
+<!--            <artifactId>athena</artifactId>-->
+<!--            <version>2.13.11</version>-->
+<!--        </dependency>-->
+<!--        &lt;!&ndash; https://mvnrepository.com/artifact/software.amazon.awssdk/s3 &ndash;&gt;-->
+<!--        <dependency>-->
+<!--            <groupId>software.amazon.awssdk</groupId>-->
+<!--            <artifactId>s3</artifactId>-->
+<!--            <version>2.13.12</version>-->
+<!--            <scope>test</scope>-->
+<!--        </dependency>-->
+
         <dependency>
             <groupId>com.simba</groupId>
             <artifactId>athena</artifactId>

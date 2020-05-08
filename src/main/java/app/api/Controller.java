@@ -2,6 +2,7 @@ package app.api;
 
 import app.AppLogging;
 import app.dao.client.*;
+import app.dao.query.Coordinate;
 import app.dao.query.VariantQuery;
 import app.dao.client.StringUtils;
 import com.amazonaws.regions.Region;
@@ -10,11 +11,13 @@ import com.amazonaws.services.s3.model.S3ObjectId;
 import com.google.cloud.bigquery.*;
 import com.google.cloud.storage.BlobId;
 import com.google.gson.stream.JsonWriter;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.Logger;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Nullable;
+import javax.management.Query;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.validation.ValidationException;
@@ -66,10 +69,15 @@ public class Controller {
     };
 
     // NOTE: bigquery identifiers are case sensitive, athena are not
-    final static String athenaVcfTable = "thousandorig_half2_partitioned_bucketed";
-    final static String bigqueryVcfTable = "thousandorig_half1_clustered";
+//    final static String athenaVcfTable = "thousandorig_half2_partitioned_bucketed";
+    final static String athenaVcfTable = "thousandorig_half2_partitioned_4000";
+    final static String bigqueryVcfTable = "thousandorig_half1_partitioned";
     final static String athenaAnnotationTable = "hg19_variant_9b_table_part";
-    final static String bigqueryAnnotationTable = "hg19_Variant_9B_Table";
+
+//    final static String bigqueryAnnotationTable = "hg19_Variant_9B_Table";
+    final static String bigqueryAnnotationTable = "hg19_Variant_9B_Table_part_start_position";
+
+    final static String bigqueryDbSnpTableName = "GRCh37_dbSNP_00_All";
 
     public Controller() {
         getBigQueryClient();
@@ -100,11 +108,7 @@ public class Controller {
         return s3Client;
     }
 
-    private class GeneCoordinate {
-        public String referenceName;
-        public Long startPosition;
-        public Long endPosition;
-    }
+
 
     public String loadSqlFile(String basename) throws IOException {
         final String MAIN_ROOT = System.getProperty("user.dir") + "/src/main/";
@@ -120,7 +124,7 @@ public class Controller {
             @PathVariable("gene_label") String geneLabel,
             HttpServletRequest request, HttpServletResponse response
     ) throws InterruptedException, ExecutionException, TimeoutException, IOException {
-        GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+        Coordinate geneCoordinate = getGeneCoordinates(geneLabel);
         String referenceName = geneCoordinate.referenceName;
         String startPosition = geneCoordinate.startPosition.toString();
         String endPosition = geneCoordinate.endPosition.toString();
@@ -320,6 +324,47 @@ public class Controller {
         log.debug("Wrote results to response stream");
     }
 
+    // https://stackoverflow.com/a/2671052/2172133
+    public class Tuple<X, Y> {
+        public final X x;
+        public final Y y;
+        public Tuple(X x, Y y) {
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+
+    /**
+     *
+     */
+    private Coordinate getRsidLocation(String rsid) throws InterruptedException {
+        String sql = "select `chrm` as reference_name, `start` as start_position, `end` as end_position"
+                + " from " + String.format("`%s.%s`", bigQueryClient.getDatasetName(), bigqueryDbSnpTableName)
+                + " where id = @id";
+
+        QueryJobConfiguration queryJobConfiguration = QueryJobConfiguration.newBuilder(sql)
+                .addNamedParameter("id", QueryParameterValue.string(rsid))
+                .build();
+        // TODO doesn't store result table anywhere for cleanup, add explicit destination
+        TableResult tr = bigQueryClient.runQueryJob(queryJobConfiguration);
+
+        long totalRows = tr.getTotalRows();
+        if (totalRows == 1) {
+            Iterator<FieldValueList> fieldValueLists = tr.iterateAll().iterator();
+            FieldValueList fieldValueList = fieldValueLists.next();
+            Coordinate coordinate = new Coordinate();
+            coordinate.referenceName = fieldValueList.get("reference_name").getStringValue();
+            coordinate.startPosition = fieldValueList.get("start_position").getLongValue();
+            coordinate.endPosition = fieldValueList.get("end_position").getLongValue();
+            return coordinate;
+        } else if (totalRows > 1) {
+            throw new IllegalStateException("More than 1 record found for rsid " + rsid);
+        } else {
+            // totalRows < 1, not found
+            return null;
+        }
+    }
 
     /**
      * Returns a map with two entries, half1 and half2. These are in turn a map of
@@ -396,7 +441,7 @@ public class Controller {
         return retMap;
     }
 
-    private GeneCoordinate getGeneCoordinates(String geneLabel) throws InterruptedException, ExecutionException, TimeoutException {
+    private Coordinate getGeneCoordinates(String geneLabel) throws InterruptedException, ExecutionException, TimeoutException {
         Pattern geneNamePattern = Pattern.compile("[a-zA-Z0-9]+");
         Matcher geneNameMatcher = geneNamePattern.matcher(geneLabel);
         if (!geneNameMatcher.matches()) {
@@ -406,9 +451,9 @@ public class Controller {
         }
 
         ExecutorService executorService = Executors.newFixedThreadPool(2);
-        Callable<GeneCoordinate> geneLookupCallable = new Callable<GeneCoordinate>() {
+        Callable<Coordinate> geneLookupCallable = new Callable<Coordinate>() {
             @Override
-            public GeneCoordinate call() throws Exception {
+            public Coordinate call() throws Exception {
                 // get gene coordinates
 //                String coordSql =
 //                        "select chromosome, start_position, end_position"
@@ -430,7 +475,7 @@ public class Controller {
                     return null;
                 }
                 FieldValueList fieldValues = fieldValueListIterator.next();
-                GeneCoordinate coordinate = new GeneCoordinate();
+                Coordinate coordinate = new Coordinate();
                 coordinate.referenceName = fieldValues.get("reference_name").getStringValue();
                 coordinate.startPosition = fieldValues.get("start_position").getLongValue();
                 coordinate.endPosition = fieldValues.get("end_position").getLongValue();
@@ -442,8 +487,8 @@ public class Controller {
             }
         };
 
-        final GeneCoordinate geneCoordinate;
-        Future<GeneCoordinate> coordinateFuture = executorService.submit(geneLookupCallable);
+        final Coordinate geneCoordinate;
+        Future<Coordinate> coordinateFuture = executorService.submit(geneLookupCallable);
         executorService.shutdown();
         try {
             geneCoordinate = coordinateFuture.get(3 * 60, TimeUnit.SECONDS);
@@ -735,7 +780,7 @@ public class Controller {
             if (!StringUtils.isAllEmpty(rsidParam, referenceNameParam, startPositionParam, endPositionParam)) {
                 throw new ValidationException("Cannot mix gene filter with coordinate or rsid filters");
             }
-            GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+            Coordinate geneCoordinate = getGeneCoordinates(geneLabel);
             if (geneCoordinate == null) {
                 throw new IllegalArgumentException("Gene could not be found in coordinates table");
             }
@@ -750,7 +795,7 @@ public class Controller {
             if (StringUtils.isEmpty(referenceNameParam)) {
                 throw new ValidationException("Must provide a either an rsid or referenceName parameter");
             }
-            if (StringUtils.isAnyEmpty(startPositionParam, endPositionParam)) {
+            if (StringUtils.isAllEmpty(startPositionParam, endPositionParam)) {
                 throw new ValidationException("Must provide either a start or end position filter");
             }
         }
@@ -869,6 +914,30 @@ public class Controller {
             String alternateBasesParam,
             String positionRange,
             String rsid) throws IOException, InterruptedException {
+        return getVariants( // Return the overloaded method, with variantColumnsOnly = false
+                sourceDatabaseType,
+                destinationDatabaseType,
+                referenceNameParam,
+                startPositionParam,
+                endPositionParam,
+                referenceBasesParam,
+                alternateBasesParam,
+                positionRange,
+                rsid,
+                false);
+    }
+
+    private SwarmTableIdentifier getVariants(
+            String sourceDatabaseType,
+            Optional<String> destinationDatabaseType,
+            String referenceNameParam,
+            String startPositionParam,
+            String endPositionParam,
+            String referenceBasesParam,
+            String alternateBasesParam,
+            String positionRange,
+            String rsid,
+            boolean variantColumnsOnly) throws IOException, InterruptedException {
         String sourceDatabaseName = "swarm";
         String sourceTableName;
         if (sourceDatabaseType.equals("athena")) {
@@ -892,7 +961,8 @@ public class Controller {
                 referenceBasesParam,
                 alternateBasesParam,
                 positionRange,
-                rsid);
+                rsid,
+                variantColumnsOnly);
         log.info("Finished call to queryTableByVariantCoordinates for variants from database type " + sourceDatabaseType);
         return swarmTableIdentifier;
     }
@@ -1218,7 +1288,8 @@ public class Controller {
             String referenceBasesParam,
             String alternateBasesParam,
             String positionRange,
-            String rsid
+            String rsid,
+            boolean variantColumnsOnly
     ) throws IOException, InterruptedException {
         VariantQuery variantQuery = new VariantQuery();
         boolean returnResults = false;
@@ -1258,7 +1329,28 @@ public class Controller {
             }
             if (!StringUtils.isEmpty(rsid)) {
                 variantQuery.setRsid(rsid);
+
+                // Check if position is unbounded, if so, lookup RSID
+                if (StringUtils.isAnyEmpty(referenceNameParam, startPositionParam, endPositionParam)) {
+
+                    Coordinate coordinate = getRsidLocation(rsid);
+                    log.info("Looked up rsid, filling empty location parameters");
+                    if (coordinate == null) {
+                        // Cut off query early, do not bother performing it
+                        throw new ValidationException("Unknown RSID " + rsid);
+                    }
+                    if (StringUtils.isEmpty(referenceNameParam)) {
+                        variantQuery.setReferenceName(coordinate.referenceName);
+                    }
+                    if (StringUtils.isEmpty(startPositionParam)) {
+                        variantQuery.setStartPosition(coordinate.startPosition);
+                    }
+                    if (StringUtils.isEmpty(endPositionParam)) {
+                        variantQuery.setEndPosition(coordinate.endPosition);
+                    }
+                }
             }
+            variantQuery.setVariantColumnsOnly(variantColumnsOnly);
         } catch (ValidationException e) {
             log.error("Failed to validate parameters");
             throw e;
@@ -1412,7 +1504,8 @@ public class Controller {
                 referenceBasesParam,
                 alternateBasesParam,
                 positionRange,
-                rsid);
+                rsid,
+                false);
         log.info("Finished call to queryTableByVariantCoordinates for annotation");
         return swarmTableIdentifier;
     }
@@ -1809,7 +1902,7 @@ public class Controller {
 
         if (!StringUtils.isEmpty(geneLabel)) {
             log.debug("Performing gene based query for " + geneLabel);
-            GeneCoordinate geneCoordinate = getGeneCoordinates(geneLabel);
+            Coordinate geneCoordinate = getGeneCoordinates(geneLabel);
             if (geneCoordinate == null) {
                 throw new IllegalArgumentException("Gene could not be found in coordinates table " + geneLabel);
             }
