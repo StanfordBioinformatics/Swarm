@@ -1,0 +1,15 @@
+[
+  {
+    "classification": "spark-defaults",
+    "properties": {
+      "spark.driver.maxResultSize": "10g",
+      "spark.driver.memory": "10g"
+    }
+  },
+  {
+    "classification": "livy-conf",
+    "properties": {
+      "livy.server.session.timeout": "5h"
+    }
+  }
+]
