@@ -31,3 +31,5 @@ Information about service endpoints are in [API.md](API.md).
 More details about installing and running are in [Using.md](doc/Using.md).
 
 Details about connecting to data sources are in [Data.md](doc/Data.md).
+
+Details about future extensions are in [Extending.md](doc/Extending.md).
