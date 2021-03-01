@@ -24,3 +24,10 @@ $ mvn package
 Maven builds a jar and puts it in `target/` directory.  It defaults to port 8080, which must be unbound prior to running.
 ```
 $ java -jar target/swarm-1.0-SNAPSHOT.jar
+```
+
+Information about service endpoints are in [API.md](API.md).
+
+More details about installing and running are in [Using.md](doc/Using.md).
+
+Details about connecting to data sources are in [Data.md](doc/Data.md).
