@@ -1,0 +1,17 @@
+# Extending Swarm
+
+The goal of Swarm is to provide a way to unify the querying of genomic variant and variant annotation tables across cloud providers, and AWS and GCP were chosen as prime targets for this work. Serverless databases Athena and BigQuery were chosen because of their applicability in large scale data warehousing due to their ability to read from cold (or *cool*) object storage instead of a live hot-provisioned block storage device like EC2 disks or Google persistent disks, or other provisioned storage that can be prohibitively and unnecessarily expensive to keep provisioned at large scales.
+
+This method of federating tabular genomic data can in theory be extended to any database backend, if a client is provided to interact with its query engine and a storage client is provided to read/write to it as a storage layer. This is most easy to do with SQL-based databases for which *external tables* are supported, such that CSV data can be uploaded and queried with ease, but any system for which a CSV translation to/from client can be written can be used. Current database and storage clients are in the [app/dao/client](https://github.com/StanfordBioinformatics/swarm/tree/42e860c18fcd4e2ecbac90e4387a4b129d1fa743/src/main/java/app/dao/client) package, which also contains some utility classes like DirectoryConcatInputStreams and OutputInputStream for faciliting compressed file transfers between GCS and S3. As of now, the DirectoryConcatInputStream classes use local `/tmp` storage to stage the data for upload on the other side. However these can be extended to only use memory to pass InputStream data downloaded to the OutputStream to be uploaded.
+
+There is a good bit of work that needs to be done to make Swarm fully modular and backend-agnostic. These changes should be made to make Controller.java as agnostic to the database platforms as possible. Right now it makes assumptions that the two databases are only `bigquery` and `athena`. Each database and storage client is configured with credentials and locations as needed already, and these could be loaded by a runtime argument and referred to in a set mapped by their corresponding name (ex: `bigquery`, `athena`, `postgres`, `dataproc`, or more descriptive labels given to different configurations). Right now, to extend swarm to other database platforms, a query and storage client need to be written, as would always be true, but Controller.java must also be refactored to include cases for that additional database.
+
+### Pluggable database federation
+
+In addition to extending to tables of variant/annotation data on additional database platforms, there is a more generic potential extension of this idea to tables of arbitrary data. Similar to the `hail` or `spark` notion of dataframes and joining data and performing processing on a set of columns to come up with results, a thin wrapper client around tables could be created to enable similar behavior here. The client would need to know how to authenticate and query for data in the table, and what the primary key of the table is in order to perform joins against another table with the same primary key.
+```java
+client = new AthenaClient(credentials, region)
+primaryKey = new String[]{"chr", "start", "end", "ref", "alt"}
+tableIdentifier = "swarm.1000_Genomes"
+table = client.getTable(tableIdentifier, primaryKey)
+```
