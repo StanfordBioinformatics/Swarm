@@ -1,3 +1,4 @@
+build/
 conf/azure.json
 conf/aws.json
 conf/gcp.json
