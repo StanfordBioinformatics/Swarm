@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 
 from providers import factory as provider_factory
 
-logger = logging.getLogger('fed-swarm')
+logger = logging.getLogger('federated')
 
 
 def main():

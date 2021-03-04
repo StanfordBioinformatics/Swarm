@@ -6,19 +6,6 @@ from retry import retry
 
 
 class Instance:
-    @staticmethod
-    def get_machine_types(conf, min_mem):
-        service = conf['Platform']['service']
-        service = service.lower()
-        cpu_list = conf['Profiling'].get('thread', [4])
-        if service in ['google', 'gcp']:
-            region = conf['Platform']['regions']
-            return GCPInstance.get_machine_types(region, cpu_list, min_mem)
-        elif service == 'aws':
-            return AWSInstance.get_machine_types(['r4', 'r5'], cpu_list, min_mem)
-        elif service in ['azure', 'az']:
-            return AzureInstance.get_machine_types(conf, cpu_list, min_mem)
-
     def __init__(self, name, cpu, mem):
         self.name = name
         self.cpu = int(cpu)

@@ -1,11 +1,10 @@
 import logging
 import uuid
 
-from Hummingbird import instance, scheduler
+from batch import instance, scheduler
+from providers.provider import Provider
 
-from .provider import Provider
-
-logger = logging.getLogger('fed-swarm')
+logger = logging.getLogger('federated')
 
 
 class AzureProvider(Provider):

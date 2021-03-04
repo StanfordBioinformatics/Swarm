@@ -1,4 +1,11 @@
-class AWSProvider:
+import logging
+
+from providers.provider import Provider
+
+logger = logging.getLogger('federated')
+
+
+class AWSProvider(Provider):
     def __init__(self, conf):
         super(AWSProvider, self).__init__(conf)
 

@@ -1,13 +1,16 @@
-from Hummingbird import scheduler
+import logging
 
-from .provider import Provider
+from batch import scheduler, instance
+from providers.provider import Provider
+
+logger = logging.getLogger('federated')
 
 
 class GCPProvider(Provider):
     def __init__(self, conf):
         super(GCPProvider, self).__init__(conf)
         self.tool = 'dsub'
-        self.instance = scheduler.GCPInstance()
+        self.instance = instance.GCPInstance()
         bucket, path = self.split_bucket_object(self.conf['output'])
         self.bucket = bucket
         self.path = path
