@@ -1,0 +1,11 @@
+inputdir <- Sys.getenv("INPUT", "data")
+covariatefile <- paste(inputdir, "EUR.cov", sep = "/")
+pcsfile <- paste(inputdir, "EUR.eigenvec", sep = "/")
+covfile <- paste(inputdir, "EUR.cov", sep = "/")
+
+covariate <- read.table(covariatefile, header=T)
+pcs <- read.table(pcsfile, header=F)
+colnames(pcs) <- c("FID","IID", paste0("PC",1:6))
+cov <- merge(covariate, pcs, by=c("FID", "IID"))
+write.table(cov, covfile, quote=F, row.names=F)
+q()

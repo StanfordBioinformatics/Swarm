@@ -1,0 +1,3 @@
+azure-cli==2.19.1
+awscli==1.19.14
+gsutil==4.59
