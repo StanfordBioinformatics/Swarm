@@ -1,0 +1,9 @@
+build/
+conf/azure.json
+conf/aws.json
+conf/gcp.json
+.idea/
+federated.egg-info/
+dist/
+*.tmp
+__pycache__/

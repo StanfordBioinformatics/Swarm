@@ -1,0 +1,13 @@
+{
+  "Platform": {
+    "service": "azure",
+    "subscription": "",
+    "resource_group": "",
+    "location": "",
+    "storage_account": "",
+    "storage_container": "",
+    "storage_connection_string": "",
+    "batch_account": "",
+    "batch_key": ""
+  }
+}
