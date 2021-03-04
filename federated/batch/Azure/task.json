@@ -1,0 +1,12 @@
+[
+  {
+    "image": "federatedswarm/batch:latest",
+    "commandLine": "/bin/bash -c '/usr/src/entrypoint.sh'",
+    "constraints": {
+      "maxWallClockTime": "P4D",
+      "maxTaskRetryCount": 1,
+      "retentionTime": "P4D"
+    },
+    "environmentSettings": []
+  }
+]

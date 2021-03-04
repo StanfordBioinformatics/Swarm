@@ -1,7 +1,7 @@
 import json
 import os
 
-from .provider import Provider
+from providers.provider import Provider
 
 
 class MissingProviderError(Exception):

@@ -11,7 +11,7 @@ from typing import List
 import boto3
 from retry import retry
 
-from . import utils
+from batch import utils
 
 try:
     from email import encoders
