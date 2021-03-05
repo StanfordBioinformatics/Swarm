@@ -16,7 +16,7 @@ This is a Python script that allows federation of batch jobs across the followin
 It is recommended to use a Python Virtualenv. See instructions [here](https://docs.python.org/3/library/venv.html)
 
 ```bash
-python3 install setup.py
+python3 setup.py install
 ```
 
 ## Run
