@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 import os
 
@@ -12,12 +15,22 @@ class InvalidProviderError(Exception):
     pass
 
 
-def get_source_provider(source: str, conf) -> Provider:
-    return __get_provider(source, conf)
+def get_source_provider(args) -> Provider:
+    return __get_provider(args.platform1, {
+        'image': args.image1,
+        'input': args.input1,
+        'output': args.output1,
+        'logging': args.logging1
+    })
 
 
-def get_target_provider(target, conf) -> Provider:
-    return __get_provider(target, conf)
+def get_target_provider(args) -> Provider:
+    return __get_provider(args.platform2, {
+        'image': args.image2,
+        'input': args.input2,
+        'output': args.output2,
+        'logging': args.logging2,
+    })
 
 
 def __get_provider(name, initial_conf) -> Provider:

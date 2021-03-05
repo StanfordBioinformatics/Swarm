@@ -1,7 +1,7 @@
 {
   "Platform": {
     "service": "gcp",
-    "project": "",
-    "regions": "us-west1"
+    "project": "required",
+    "regions": "required"
   }
 }

@@ -1,0 +1,23 @@
+{
+    "jobDefinitionName": "swarm-job",
+    "type": "container",
+    "containerProperties": {
+        "image": "federatedswarm/batch:latest",
+        "vcpus": 0,
+        "memory": 0,
+        "command": [],
+        "volumes": [
+        ],
+        "environment": [
+        ],
+        "mountPoints": [
+        ],
+        "ulimits": [
+        ],
+        "resourceRequirements": [
+        ]
+    },
+    "retryStrategy": {
+        "attempts": 1
+    }
+}

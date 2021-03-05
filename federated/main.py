@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import argparse
 import logging
 from os import path
@@ -15,31 +18,20 @@ def main():
 
     logger.info('Platform1: "{}" -- Platform2: "{}"'.format(args.platform1, args.platform2))
 
-    platform1 = provider_factory.get_source_provider(args.platform1, {
-        'image': args.image1,
-        'input': args.input1,
-        'output': args.output1,
-        'logging': args.logging1
-    })
-
-    platform2 = provider_factory.get_target_provider(args.platform2, {
-        'image': args.image2,
-        'input': args.input2,
-        'output': args.output2,
-        'logging': args.logging2,
-    })
+    platform1 = provider_factory.get_source_provider(args)
+    platform2 = provider_factory.get_target_provider(args)
 
     logger.info('Starting workload on Platform1')
     platform1.run_source()
     logger.info('Completed workload on Platform1')
 
     with TemporaryDirectory() as temp_dir:
-        logger.info('Starting transfer of output files from Platform1 to Platform2')
-        platform1.download_blobs(path.dirname(args.output1), temp_dir)
+        logger.info('Starting transfer of input/output files from Platform1 to Platform2')
+        platform1.download_blobs(args.output1, temp_dir)
         platform1.download_blobs(args.input1, temp_dir)
 
         result = platform2.upload_blobs(temp_dir, args.input2)
-        logger.info('Completed transfer of output files from Platform1 to Platform2. %s', result)
+        logger.info('Completed transfer of inpput/output files from Platform1 to Platform2. %s', result)
 
         logger.info('Starting workload on Platform2')
         platform2.run_target()
