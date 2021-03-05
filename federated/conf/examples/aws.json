@@ -1,6 +1,7 @@
 {
   "Platform": {
-    "project": "gbsc-aws-prj-mvp",
+    "service": "aws",
+    "project": "",
     "regions": "us-west-2"
   }
 }

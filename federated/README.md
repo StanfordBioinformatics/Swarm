@@ -7,8 +7,8 @@ This is a Python script that allows federation of batch jobs across the followin
 
 ## Pre-requisites
 
-- Make a copy of the provider's config file location in `conf/examples` directory.
-- Populate the requires fields and place in the `conf/` directory.
+- Make a copy of the provider's config file location in [conf/examples](conf/examples) directory.
+- Populate the requires fields and place in the [conf/](conf/) directory.
 - Python3
 
 ## Install Dependencies
@@ -36,6 +36,10 @@ python3 main.py \
     --image2 federatedswarm/batch:latest \
     --verbose
 ```
+
+Additional Guides:
+- [Getting Started on Cloud Providers](docs/getting-started.md)
+- [Cloud Provider Requirements](docs/cloud-requirements.md)
 
 ## Docker
 
