@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 COMMAND="$@"
 
@@ -16,6 +16,8 @@ else
 fi
 
 cat > run.sh <<- EOM
+set -ex
+
 $PRE_COMMAND
 
 $COMMAND

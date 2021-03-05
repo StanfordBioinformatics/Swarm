@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import logging
 
 from batch import scheduler, instance
@@ -44,7 +47,7 @@ class GCPProvider(Provider):
     #     return cmd
 
     @staticmethod
-    def _run_cmd(sched: scheduler.Scheduler):
+    def _run_cmd(sched: scheduler.DSubcheduler):
         subprocess = sched.run()
         if subprocess.wait() != 0:
             raise ChildProcessError('There was an issue running dsub task')
@@ -52,7 +55,7 @@ class GCPProvider(Provider):
     def _get_scheduler(self, cmd):
         assert cmd is not None, 'cmd is required'
 
-        sched = scheduler.Scheduler(self.tool, self.conf)
+        sched = scheduler.DSubcheduler(self.tool, self.conf)
 
         sched.add_argument('--command', cmd)
         sched.add_argument('--image', self.conf['Platform'].get('image', self.image))

@@ -1,12 +1,12 @@
 {
   "Platform": {
     "service": "azure",
-    "subscription": "",
-    "resource_group": "",
-    "location": "",
-    "storage_account": "",
+    "subscription": "required",
+    "resource_group": "required",
+    "location": "required",
+    "storage_account": "required",
     "storage_container": "",
-    "storage_connection_string": "",
+    "storage_connection_string": "required",
     "batch_account": "",
     "batch_key": ""
   }

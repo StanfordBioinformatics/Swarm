@@ -1,7 +1,9 @@
 {
   "Platform": {
     "service": "aws",
-    "project": "",
-    "regions": "us-west-2"
+    "regions": "required",
+    "subnets": ["required"],
+    "security_groups": ["required"],
+    "instance_type": "optional"
   }
 }

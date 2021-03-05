@@ -1,0 +1,24 @@
+{
+    "computeEnvironmentName": "swarm-comp-env",
+    "type": "MANAGED",
+    "state": "ENABLED",
+    "computeResources": {
+        "type": "EC2",
+        "allocationStrategy": "BEST_FIT",
+        "minvCpus": 0,
+        "maxvCpus": 256,
+        "desiredvCpus": 0,
+        "instanceTypes": [],
+        "subnets": [],
+        "securityGroupIds": [],
+        "instanceRole": "arn:aws:iam::{}:instance-profile/ecsInstanceRole",
+        "tags": {
+            "KeyName": "swarm"
+        },
+        "launchTemplate": {
+            "launchTemplateName": "swarm_disk_launch_template",
+            "version": "$Latest"
+        }
+    },
+    "serviceRole": "arn:aws:iam::{}:role/AWSBatchServiceRole"
+}

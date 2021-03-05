@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -ex
 
 DATA_DIR=${INPUT:-data}
 echo "Using ${DATA_DIR} as the data directory..."

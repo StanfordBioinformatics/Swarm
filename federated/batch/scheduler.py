@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 import logging
 import os
@@ -23,7 +26,7 @@ except ImportError:
     from email.mime.text import MIMEText
 
 
-class Scheduler(object):
+class DSubcheduler(object):
     """Dsub scheduler construction and execution."""
 
     def __init__(self, tool, conf):
@@ -31,11 +34,11 @@ class Scheduler(object):
         if self.tool == 'dsub':
             self.cmd = 'dsub'
             self.add_argument('--provider', 'google-v2')
-            self.add_argument('--project', conf['Platform']['project'])
-            if 'zones' in conf['Platform']:
-                self.add_argument('--zones', conf['Platform']['zones'])
+            self.add_argument('--project', conf[utils.PLATFORM]['project'])
+            if 'zones' in conf[utils.PLATFORM]:
+                self.add_argument('--zones', conf[utils.PLATFORM]['zones'])
             else:
-                self.add_argument('--regions', conf['Platform']['regions'])
+                self.add_argument('--regions', conf[utils.PLATFORM]['regions'])
 
     def add_argument(self, argname, value=None):
         """Add one argument to cmd string."""
@@ -51,8 +54,8 @@ class Scheduler(object):
 
 
 class BaseBatchSchduler(object):
-    job_def_name = 'hummingbird-job'
-    compute_env_prefix = 'hummingbird-env-'
+    job_def_name = 'swarm-job'
+    compute_env_prefix = 'swarm-comp-env-'
     startup_script_template = '''#cloud-boothook
 #!/bin/bash
 cloud-init-per once docker_options echo 'OPTIONS="$${OPTIONS} --storage-opt dm.basesize=$basesize"' >> /etc/sysconfig/docker
@@ -60,15 +63,14 @@ cloud-init-per once docker_options echo 'OPTIONS="$${OPTIONS} --storage-opt dm.b
 
 
 class AWSBatchScheduler(BaseBatchSchduler):
-    def __init__(self, conf, machine, disk_size, script):
+    def __init__(self, conf, machine, disk_size):
         self.conf = conf
         self.machine = machine
         self.disk_size = disk_size
-        self.script = script
         self.batch_client = boto3.client('batch')
         super(AWSBatchScheduler, self).__init__()
 
-    def update_laungch_template(self):
+    def update_launch_template(self):
         basesize = str(self.disk_size) + 'G'
         startup_script = Template(self.startup_script_template).substitute(basesize=basesize)
         payload = MIMEText(startup_script, 'cloud-boothook')
@@ -78,26 +80,40 @@ class AWSBatchScheduler(BaseBatchSchduler):
         encoders.encode_base64(user_data)
         user_data_base64 = user_data.get_payload()
 
-        with open('AWS/launch-template-data.json') as f:
+        path = os.path.join(os.path.dirname(__file__), 'AWS/launch-template-data.json')
+        with open(path) as f:
             data = json.load(f)
             data['LaunchTemplateData']['BlockDeviceMappings'][0]['Ebs']['VolumeSize'] = self.disk_size
             data['LaunchTemplateData']['UserData'] = user_data_base64
 
-        subprocess.call(['aws', 'ec2', '--region', 'us-west-2', 'create-launch-template-version', '--cli-input-json',
-                         json.dumps(data)])
+        subprocess.call(
+            ['aws', 'ec2', '--region', self.conf[utils.PLATFORM]['regions'], 'create-launch-template', '--cli-input-json', json.dumps(data)]
+        )
 
     def create_compute_environment(self):
         env_name = self.compute_env_prefix + self.machine.name.replace('.', '_') + '-' + str(self.disk_size)
         output = subprocess.check_output(
-            ['aws', 'batch', 'describe-compute-environments', '--compute-environments', env_name])
+            ['aws', 'batch', 'describe-compute-environments', '--compute-environments', env_name]
+        )
+
         desc_json = json.loads(output)
-        if desc_json['computeEnvironments']:  # Create if not exist
+        if desc_json['computeEnvironments'] and any(desc_json['computeEnvironments']):  # Create if not exist
             return env_name
 
-        with open('AWS/compute_environment.json') as f:
+        account_id = subprocess.check_output(
+            ['aws', 'sts', 'get-caller-identity', '--query', 'Account', '--output', 'text'], universal_newlines=True
+        ).strip()
+
+        path = os.path.join(os.path.dirname(__file__), 'AWS/compute_environment.json')
+        with open(path) as f:
             data = json.load(f)
             data['computeEnvironmentName'] = env_name
             data['computeResources']['instanceTypes'].append(self.machine.name)
+            data['computeResources']['subnets'].extend(self.conf[utils.PLATFORM]['subnets'])
+            data['computeResources']['securityGroupIds'].extend(self.conf[utils.PLATFORM]['security_groups'])
+            data['computeResources']['instanceRole'] = data['computeResources']['instanceRole'].format(account_id)
+            data['serviceRole'] = data['serviceRole'].format(account_id)
+
         subprocess.call(['aws', 'batch', 'create-compute-environment', '--cli-input-json', json.dumps(data)])
 
         while True:
@@ -126,32 +142,36 @@ class AWSBatchScheduler(BaseBatchSchduler):
         time.sleep(1)
         return job_queue_name
 
-    def reg_job_def(self):
-        with open('AWS/job-defination.json') as f:
+    def reg_job_def(self, cmd, environment):
+        path = os.path.join(os.path.dirname(__file__), 'AWS/job-def.json')
+        with open(path) as f:
             data = json.load(f)
             data['containerProperties']['vcpus'] = self.machine.cpu
             data['containerProperties']['memory'] = int(self.machine.mem) * 1024
+
+        data['containerProperties']['command'] = cmd
+        data['containerProperties']['environment'] = environment
+        data['containerProperties']['image'] = self.conf['image']
         subprocess.call(['aws', 'batch', 'register-job-definition', '--cli-input-json', json.dumps(data)])
 
-    def submit_job(self, tries=1):
-        job_queue_name = self.update_job_queue(self.create_compute_environment())
+    def submit_job(self, cmd, environment):
+        self.reg_job_def(cmd, environment)
+        self.update_launch_template()
+        env_name = self.create_compute_environment()
+        job_queue_name = self.update_job_queue(env_name)
 
-        jobname = os.path.basename(self.script)
-        s3_path = 's3://' + self.conf[utils.PLATFORM]['bucket'] + '/script/' + jobname + '.sh'
-        subprocess.call(['aws', 's3', 'cp', self.script, s3_path])
         data = dict()
         data['vcpus'] = self.machine.cpu
         data['memory'] = int(self.machine.mem * 1024 * 0.9)
-        data['command'] = [jobname + '.sh']
-        data['environment'] = [{"name": "BATCH_FILE_TYPE", "value": "script"},
-                               {"name": "BATCH_FILE_S3_URL", "value": s3_path}]
-        arguments = ['aws', 'batch', 'submit-job', '--job-name', jobname,
-                     '--job-queue', job_queue_name,
-                     '--job-definition', self.job_def_name,
-                     '--container-overrides', json.dumps(data)]
-        if tries > 1:
-            array_properties = {"size": tries}
-            arguments += ['--array-properties', json.dumps(array_properties)]
+        data['command'] = cmd
+        data['environment'] = environment
+        arguments = [
+            'aws', 'batch', 'submit-job',
+            '--job-name', env_name,
+            '--job-queue', job_queue_name,
+            '--job-definition', self.job_def_name,
+            '--container-overrides', json.dumps(data)
+        ]
         output = subprocess.check_output(arguments)
         desc_json = json.loads(output)
         return desc_json['jobId']
@@ -176,8 +196,6 @@ class AzureBatchScheduler(BaseBatchSchduler):
         self.conf = conf
         self.machine = machine
         self.disk_size = disk_size
-        self.script = script
-        self.script_target_name = os.path.basename(self.script) + '.sh' if script else None
         self.task_definition = self._get_task_definition()
         self.image = self.task_definition['image']
         self.batch_client = self._get_azure_batch_client(conf)
@@ -317,10 +335,7 @@ class AzureBatchScheduler(BaseBatchSchduler):
         """
         from azure.batch import models as batchmodels
 
-        if 'id' in self.task_definition:
-            task_id = self.task_definition.get('id')
-        else:
-            task_id = os.path.basename(self.script)
+        task_id = self.task_definition.get('id', job_id)
         display_name = self.task_definition.get('displayName', task_id)
 
         logging.info('Adding {} tasks to job [{}]...'.format(task_id, job_id))
@@ -337,7 +352,6 @@ class AzureBatchScheduler(BaseBatchSchduler):
             batchmodels.EnvironmentSetting(name='AZURE_STORAGE_CONTAINER', value=platform['storage_container']),
             batchmodels.EnvironmentSetting(name='AZURE_STORAGE_CONNECTION_STRING',
                                            value=platform['storage_connection_string']),
-            batchmodels.EnvironmentSetting(name='BLOB_NAME', value=self.script_target_name),
         ]
 
         if 'environmentSettings' in self.task_definition and self.task_definition['environmentSettings'] is not None:
@@ -413,21 +427,9 @@ class AzureBatchScheduler(BaseBatchSchduler):
         raise RuntimeError("ERROR: Tasks did not reach 'Completed' state within "
                            "timeout period of " + str(timeout))
 
-    @retry(tries=3, delay=1)
-    def upload_script(self):
-        if not self.script:
-            return
-
-        with open(self.script, 'rb') as data:
-            self.container_client.upload_blob(
-                name=self.script_target_name,
-                data=data,
-            )
-
     def submit_job(self, tries=1):
         pool_id = self.create_pool()
         job = self.create_job(pool_id)
-        self.upload_script()
         task = self.add_task(job.id, default_max_tries=tries)
         return {
             'pool_id': pool_id,

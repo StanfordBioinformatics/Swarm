@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import logging
 import uuid
 
@@ -87,7 +90,9 @@ class AzureProvider(Provider):
             },
             {
                 'name': 'POST_COMMAND_B64',
-                'value': self.b64_encode(self._get_upload_blobs_cmd(output, self.conf['output']))
+                'value': self.b64_encode(
+                    self._get_upload_blobs_cmd(output, self.conf['output']) + ' || :'
+                )
             },
             {
                 'name': 'INPUT',
