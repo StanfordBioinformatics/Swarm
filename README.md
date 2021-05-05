@@ -1,4 +1,4 @@
-<img src="https://github.com/StanfordBioinformatics/Swarm/blob/master/Swarm-logo.png" width="200" align="right">
+<img src="https://github.com/StanfordBioinformatics/Swarm/blob/master/Swarm-logo.png" width="300" align="right">
 
 # Swarm: A federated Cloud Framework for Large-scale Variant Analysis
 
