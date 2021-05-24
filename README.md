@@ -1,6 +1,6 @@
 <img src="https://github.com/StanfordBioinformatics/Swarm/blob/master/Swarm-logo.png" width="300" align="right">
 
-# Swarm: A federated Cloud Framework for Large-scale Variant Analysis
+# Swarm: A Federated Cloud Framework for Large-scale Variant Analysis
 
 This is a Spring Boot server that queries genomic variants from Google BigQuery and Amazon Athena.
 
